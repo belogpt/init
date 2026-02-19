@@ -11,9 +11,7 @@ ok()   { printf "✅ %s\n" "$*"; }
 warn() { printf "⚠️  %s\n" "$*"; }
 err()  { printf "❌ %s\n" "$*"; }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || return 1
-}
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 require_root_or_sudo() {
   if [ "${EUID:-$(id -u)}" -ne 0 ] && ! need_cmd sudo; then
@@ -28,13 +26,6 @@ run() {
   else
     sudo bash -lc "$*"
   fi
-}
-
-is_ubuntu_like() {
-  [ -f /etc/os-release ] || return 1
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [[ "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *"ubuntu"* || "${ID_LIKE:-}" == *"debian"* || "${ID:-}" == "debian" ]]
 }
 
 ensure_apt() {
@@ -65,11 +56,11 @@ install_docker() {
   run "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
   run "chmod a+r /etc/apt/keyrings/docker.gpg"
 
+  # Determine codename
   # shellcheck disable=SC1091
   . /etc/os-release
   local codename="${VERSION_CODENAME:-}"
   if [ -z "$codename" ]; then
-    # fallback for some Debian cases
     codename="$(lsb_release -cs 2>/dev/null || true)"
   fi
   if [ -z "$codename" ]; then
@@ -85,11 +76,47 @@ install_docker() {
   ok "Docker Compose plugin: $(docker compose version | head -n1)"
 }
 
-maybe_add_user_to_docker_group() {
-  # If run as root, optionally add a target user to docker group.
-  # If run as non-root, add current user.
-  local target_user="${SUDO_USER:-${USER:-}}"
+ensure_docker_running() {
+  bold "Checking Docker daemon..."
 
+  if ! need_cmd systemctl; then
+    warn "systemctl not found. Skipping docker service management."
+    return 0
+  fi
+
+  # Show current status briefly (non-fatal)
+  run "systemctl status docker --no-pager -n 5 || true"
+
+  if run "systemctl is-active --quiet docker"; then
+    ok "Docker service is running."
+  else
+    warn "Docker service not running. Starting..."
+    run "systemctl start docker"
+  fi
+
+  # Enable on boot
+  run "systemctl enable docker"
+
+  # Socket check
+  if [ -S /var/run/docker.sock ]; then
+    ok "Docker socket exists: /var/run/docker.sock"
+  else
+    warn "Docker socket not found yet (may appear after service starts)."
+  fi
+
+  # Daemon responsiveness check
+  if docker info >/dev/null 2>&1; then
+    ok "Docker daemon responding correctly (docker info OK)."
+  else
+    warn "Docker daemon not responding for current user."
+    warn "If you run as non-root, ensure user is in docker group and re-login."
+    warn "Try: sudo systemctl restart docker"
+  fi
+}
+
+maybe_add_user_to_docker_group() {
+  # If run with sudo: add original user; else add current user.
+  local target_user="${SUDO_USER:-${USER:-}}"
   if [ -z "$target_user" ]; then
     return 0
   fi
@@ -137,8 +164,7 @@ setup_github_ssh_key() {
 configure_git_identity() {
   bold "Configure global git identity (user.name / user.email)"
 
-  local current_name
-  local current_email
+  local current_name current_email
   current_name="$(git config --global user.name || true)"
   current_email="$(git config --global user.email || true)"
 
@@ -182,12 +208,10 @@ show_versions() {
 main() {
   require_root_or_sudo
   ensure_apt
-  if ! is_ubuntu_like; then
-    warn "OS not detected as Ubuntu/Debian-like. Proceeding anyway (apt required)."
-  fi
 
   install_base_packages
   install_docker
+  ensure_docker_running
   maybe_add_user_to_docker_group
   setup_github_ssh_key
   configure_git_identity
@@ -198,6 +222,7 @@ main() {
   echo "  1) Add the printed SSH public key to GitHub."
   echo "  2) Test: ssh -T git@github.com"
   echo "  3) Clone via SSH: git clone git@github.com:OWNER/REPO.git"
+  echo "  4) If docker access denied after group add: log out/in or run: newgrp docker"
 }
 
 main "$@"
