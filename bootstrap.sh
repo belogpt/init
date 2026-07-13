@@ -179,7 +179,7 @@ usage() {
 Использование: ./bootstrap.sh [КОМАНДЫ] [ГЛОБАЛЬНЫЕ ФЛАГИ] [ОПЦИИ]
 
 Bootstrap-helper для Ubuntu/Debian. Запускайте одну или несколько команд явно.
-Запуск без аргументов показывает эту справку и завершается без изменений.
+Запуск без аргументов открывает интерактивное меню с выбором языка.
 
 Команды:
   --all                 Выполнить base packages, Docker, SSH key, Git identity,
@@ -230,7 +230,7 @@ USAGE_RU
 Usage: ./bootstrap.sh [COMMANDS] [GLOBAL FLAGS] [OPTIONS]
 
 Ubuntu/Debian bootstrap helper. Run one or more commands explicitly. Running
-without arguments prints this help and exits without changing the system.
+without arguments opens an interactive menu with language selection.
 
 Commands:
   --all                 Run base packages, Docker, SSH key, Git identity,
@@ -557,12 +557,154 @@ validate_port_rule() {
   fi
 }
 
-parse_args() {
-  if [ "$#" -eq 0 ]; then
-    usage
-    exit 0
+interactive_language_menu() {
+  if [ ! -t 0 ]; then
+    resolve_language
+    return 0
   fi
 
+  printf "\n"
+  bold "Select language / Выберите язык"
+  printf "  1) Русский\n"
+  printf "  2) English\n"
+  printf "\n"
+  local choice
+  while true; do
+    printf "Language [1-2]: "
+    read -r choice || return 0
+    case "$choice" in
+      1|ru|RU|русский|Русский) LANG_CHOICE="ru"; resolve_language; return 0 ;;
+      2|en|EN|english|English) LANG_CHOICE="en"; resolve_language; return 0 ;;
+      *) printf "Please choose 1 or 2. / Выберите 1 или 2.\n" ;;
+    esac
+  done
+}
+
+menu_title() {
+  if [ "$LANG_RESOLVED" = "ru" ]; then
+    bold "Интерактивный bootstrap-сервер"
+    printf "Выберите действие цифрой. Перед опасными действиями будет подтверждение.\n"
+  else
+    bold "Interactive server bootstrap"
+    printf "Choose an action by number. Destructive actions ask for confirmation first.\n"
+  fi
+}
+
+menu_status() {
+  if [ "$LANG_RESOLVED" = "ru" ]; then
+    printf "\nНастройки: dry-run=%s, yes=%s, skip-upgrade=%s, HTTP=%s, HTTPS=%s\n" "$DRY_RUN" "$ASSUME_YES" "$SKIP_UPGRADE" "$ALLOW_HTTP" "$ALLOW_HTTPS"
+  else
+    printf "\nSettings: dry-run=%s, yes=%s, skip-upgrade=%s, HTTP=%s, HTTPS=%s\n" "$DRY_RUN" "$ASSUME_YES" "$SKIP_UPGRADE" "$ALLOW_HTTP" "$ALLOW_HTTPS"
+  fi
+}
+
+confirm_action() {
+  local answer prompt
+  if [ "$LANG_RESOLVED" = "ru" ]; then
+    prompt="Продолжить? [y/N]: "
+  else
+    prompt="Continue? [y/N]: "
+  fi
+  printf "%s" "$prompt"
+  read -r answer || return 1
+  case "$answer" in
+    y|Y|yes|YES|Yes|д|Д|да|Да|ДА) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+interactive_run_selected() {
+  case "$1" in
+    all)
+      confirm_action || return 0
+      require_root_or_sudo; ensure_apt; install_base_packages; install_docker; ensure_docker_running; maybe_add_user_to_docker_group; setup_github_ssh_key; configure_git_identity; configure_firewall; configure_security; check_mode
+      ;;
+    check) check_mode ;;
+    docker) confirm_action || return 0; require_root_or_sudo; ensure_apt; install_docker; ensure_docker_running; maybe_add_user_to_docker_group ;;
+    git) configure_git_identity ;;
+    ssh) setup_github_ssh_key ;;
+    firewall) confirm_action || return 0; configure_firewall ;;
+    security) confirm_action || return 0; configure_security ;;
+  esac
+  bold "$(tr_line done)"
+}
+
+interactive_menu() {
+  interactive_language_menu
+  local choice
+  while true; do
+    printf "\n"
+    menu_title
+    menu_status
+    if [ "$LANG_RESOLVED" = "ru" ]; then
+      cat <<'MENU_RU'
+
+Действия:
+  1) Запустить всё для пустого сервера
+  2) Проверить систему
+  3) Установить/настроить Docker
+  4) Настроить Git identity
+  5) Создать/показать SSH-ключ для GitHub
+  6) Настроить firewall (UFW)
+  7) Установить security-пакеты
+
+Переключатели:
+  8) Включить/выключить dry-run
+  9) Включить/выключить --yes
+ 10) Включить/выключить skip-upgrade
+ 11) Включить/выключить allow HTTP (80/tcp)
+ 12) Включить/выключить allow HTTPS (443/tcp)
+
+  h) Показать справку
+  q) Выход
+MENU_RU
+      printf "Ваш выбор: "
+    else
+      cat <<'MENU_EN'
+
+Actions:
+  1) Run everything for an empty server
+  2) Check system
+  3) Install/configure Docker
+  4) Configure Git identity
+  5) Create/show GitHub SSH key
+  6) Configure firewall (UFW)
+  7) Install security packages
+
+Toggles:
+  8) Toggle dry-run
+  9) Toggle --yes
+ 10) Toggle skip-upgrade
+ 11) Toggle allow HTTP (80/tcp)
+ 12) Toggle allow HTTPS (443/tcp)
+
+  h) Show help
+  q) Quit
+MENU_EN
+      printf "Your choice: "
+    fi
+    read -r choice || return 0
+    case "$choice" in
+      1) interactive_run_selected all ;;
+      2) interactive_run_selected check ;;
+      3) interactive_run_selected docker ;;
+      4) interactive_run_selected git ;;
+      5) interactive_run_selected ssh ;;
+      6) interactive_run_selected firewall ;;
+      7) interactive_run_selected security ;;
+      8) if [ "$DRY_RUN" -eq 1 ]; then DRY_RUN=0; else DRY_RUN=1; fi ;;
+      9) if [ "$ASSUME_YES" -eq 1 ]; then ASSUME_YES=0; else ASSUME_YES=1; fi ;;
+      10) if [ "$SKIP_UPGRADE" -eq 1 ]; then SKIP_UPGRADE=0; else SKIP_UPGRADE=1; fi ;;
+      11) if [ "$ALLOW_HTTP" -eq 1 ]; then ALLOW_HTTP=0; else ALLOW_HTTP=1; fi ;;
+      12) if [ "$ALLOW_HTTPS" -eq 1 ]; then ALLOW_HTTPS=0; else ALLOW_HTTPS=1; fi ;;
+      h|H|help|Help) usage ;;
+      q|Q|quit|exit) return 0 ;;
+      *) warn "$(tr_line unknown_option "$choice")" ;;
+    esac
+  done
+}
+
+parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --help) usage; exit 0 ;;
@@ -616,7 +758,11 @@ main() {
   bold "$(tr_line done)"
 }
 
-preselect_language_from_args "$@"
-resolve_language
-parse_args "$@"
-main
+if [ "$#" -eq 0 ]; then
+  interactive_menu
+else
+  preselect_language_from_args "$@"
+  resolve_language
+  parse_args "$@"
+  main
+fi
