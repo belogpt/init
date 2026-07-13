@@ -13,6 +13,10 @@ err()  { printf "❌ %s\n" "$*"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+DRY_RUN=0
+ASSUME_YES=0
+SKIP_UPGRADE=0
+
 require_root_or_sudo() {
   if [ "${EUID:-$(id -u)}" -ne 0 ] && ! need_cmd sudo; then
     err "Need root or sudo installed."
@@ -21,6 +25,11 @@ require_root_or_sudo() {
 }
 
 run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf "Would run: %s\n" "$*"
+    return 0
+  fi
+
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     bash -lc "$*"
   else
@@ -34,7 +43,12 @@ ensure_apt() {
 
 install_base_packages() {
   bold "Updating system & installing base packages..."
-  run "apt update && apt -y upgrade"
+  run "apt update"
+  if [ "$SKIP_UPGRADE" -eq 1 ]; then
+    warn "Skipping apt upgrade because --skip-upgrade was provided."
+  else
+    run "apt -y upgrade"
+  fi
   run "apt -y install git ca-certificates curl gnupg lsb-release"
   ok "Base packages installed."
 }
@@ -213,14 +227,17 @@ Server bootstrap helper for Ubuntu/Debian. Run one or more operations explicitly
 or run without arguments to choose operations from an interactive menu.
 
 Options:
-  --help      Show this help message and exit without changes.
-  --all       Run the full bootstrap scenario: base packages, Docker,
+  --help          Show this help message and exit without changes.
+  --dry-run       Print commands that would be run without executing them.
+  --yes, -y       Assume yes for future confirmations and non-interactive use.
+  --skip-upgrade  Run apt update and package installation, but skip apt upgrade.
+  --all           Run the full bootstrap scenario: base packages, Docker,
               GitHub SSH key, git identity, and version checks.
-  --check     Show installed git/Docker versions only.
-  --docker    Install Docker, ensure the Docker daemon is running, and add
-              the current/sudo user to the docker group when needed.
-  --git       Configure global git identity (user.name / user.email).
-  --ssh-key   Create or show a GitHub ed25519 SSH key.
+  --check         Show installed git/Docker versions only.
+  --docker        Install Docker, ensure the Docker daemon is running, and add
+                  the current/sudo user to the docker group when needed.
+  --git           Configure global git identity (user.name / user.email).
+  --ssh-key       Create or show a GitHub ed25519 SSH key.
 
 Examples:
   ./bootstrap.sh
@@ -320,6 +337,15 @@ parse_args() {
       --help)
         usage
         exit 0
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      --yes|-y)
+        ASSUME_YES=1
+        ;;
+      --skip-upgrade)
+        SKIP_UPGRADE=1
         ;;
       --all)
         RUN_ALL=1
