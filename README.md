@@ -19,6 +19,21 @@ chmod +x bootstrap.sh
 ./bootstrap.sh --all --dry-run --allow-http --allow-https
 ```
 
+## Language / Язык интерфейса
+
+CLI поддерживает русский и английский язык. Выбор доступен двумя способами:
+
+```bash
+./bootstrap.sh --lang ru --help
+./bootstrap.sh --lang en --check
+BOOTSTRAP_LANG=ru ./bootstrap.sh --check
+BOOTSTRAP_LANG=en ./bootstrap.sh --all --dry-run
+```
+
+Если язык не указан, скрипт пытается выбрать русский для `ru*` locale (`LANG`, `LC_ALL`, `LC_MESSAGES`) и английский во всех остальных случаях. Значение `--lang` имеет приоритет над `BOOTSTRAP_LANG`/`BOOTSTRAP_LANGUAGE`.
+
+The CLI supports Russian and English. Use `--lang ru|en` for a one-off run or `BOOTSTRAP_LANG=ru|en` as the default environment setting.
+
 ## Поддерживаемые системы
 
 Скрипт рассчитан на системы с `apt`:
@@ -65,6 +80,7 @@ Docker устанавливается из официального репози
 | `--dry-run` | Печатать команды без выполнения. |
 | `--yes`, `-y` | Использовать неинтерактивный режим для пакетного менеджера. |
 | `--skip-upgrade` | Выполнить `apt update`, но пропустить `apt upgrade`. |
+| `--lang ru\|en` | Выбрать язык CLI-сообщений и help для текущего запуска. |
 
 ## Git options
 
@@ -74,7 +90,7 @@ Git identity можно передать флагами:
 ./bootstrap.sh --git --git-name "Your Name" --git-email "you@example.com"
 ```
 
-Или переменными окружения:
+Или переменными окружения (`BOOTSTRAP_LANG` также можно использовать независимо для языка интерфейса):
 
 ```bash
 GIT_NAME="Your Name" GIT_EMAIL="you@example.com" ./bootstrap.sh --git
@@ -181,6 +197,7 @@ newgrp docker
 Dry-run полезен перед запуском на production-сервере:
 
 ```bash
+BOOTSTRAP_LANG=ru ./bootstrap.sh --check
 ./bootstrap.sh --docker --dry-run
 ./bootstrap.sh --firewall --dry-run --allow-http --allow-https --allow-port 8080/tcp
 ./bootstrap.sh --security --dry-run
