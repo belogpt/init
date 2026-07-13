@@ -1,270 +1,188 @@
-# Server Bootstrap
+# Server Init CLI
 
-`bootstrap.sh` — интерактивный Bash-скрипт для первичной настройки Ubuntu/Debian-сервера. Он помогает установить Git и Docker, запустить Docker daemon, добавить пользователя в группу `docker`, создать SSH-ключ для GitHub и настроить глобальную Git-идентичность.
+CLI для первичной настройки Ubuntu/Debian-сервера. Скрипт помогает подготовить сервер к работе с Git, Docker, GitHub SSH-ключами, UFW firewall и базовыми security-пакетами.
 
-## Что делает скрипт
+## Возможности
 
-Скрипт умеет выполнять операции по отдельности или всё сразу:
-
-- обновляет пакеты через `apt update` и `apt upgrade`;
-- устанавливает базовые утилиты: `git`, `ca-certificates`, `curl`, `gnupg`, `lsb-release`;
-- устанавливает Docker из официального репозитория Docker;
-- устанавливает плагины Docker Buildx и Docker Compose;
-- проверяет и запускает сервис Docker через `systemctl`;
-- включает автозапуск Docker при старте системы;
-- добавляет текущего пользователя или пользователя из `SUDO_USER` в группу `docker`;
-- создаёт SSH-ключ `~/.ssh/id_ed25519` для GitHub, если он ещё не существует;
-- выводит публичный SSH-ключ, который нужно добавить в GitHub;
-- настраивает глобальные `git config --global user.name` и `user.email`;
-- показывает версии установленных Git, Docker и Docker Compose.
-
-## Поддерживаемые системы
-
-Скрипт рассчитан на дистрибутивы с пакетным менеджером `apt`:
-
-- Ubuntu;
-- Debian и совместимые системы.
-
-> Важно: установка Docker использует официальный репозиторий `download.docker.com/linux/ubuntu`. На чистом Debian или нестандартных производных дистрибутивах может потребоваться ручная адаптация репозитория Docker.
-
-## Требования
-
-Перед запуском нужны:
-
-- Bash;
-- доступ `root` или установленный `sudo`;
-- `apt`;
-- интернет-доступ для установки пакетов и загрузки GPG-ключа Docker.
+- Установка Git и базовых apt-пакетов.
+- Установка Docker из официального Docker repository для Ubuntu/Debian.
+- Установка Docker Compose plugin.
+- Запуск и включение Docker service.
+- Добавление текущего пользователя в группу `docker`.
+- Создание GitHub SSH-ключа `ed25519`.
+- Настройка глобального `git user.name` и `git user.email`.
+- Диагностика готовности сервера через `--check`.
+- Настройка UFW firewall.
+- Установка базовых security-пакетов: `fail2ban`, `unattended-upgrades`, `needrestart`.
+- Dry-run режим для просмотра действий без изменения системы.
 
 ## Быстрый старт
 
-Сделайте скрипт исполняемым и запустите полный сценарий:
-
 ```bash
 chmod +x bootstrap.sh
-./bootstrap.sh --all
+./bootstrap.sh --help
+./bootstrap.sh --check
+./bootstrap.sh --dry-run --all
+./bootstrap.sh --all --skip-upgrade
 ```
 
-Если вы вошли не под `root`, скрипт будет выполнять системные команды через `sudo`.
-
-## Интерактивный режим
-
-Если запустить скрипт без аргументов, он покажет меню:
+## Команды
 
 ```bash
-./bootstrap.sh
+./bootstrap.sh --all
+./bootstrap.sh --check
+./bootstrap.sh --docker
+./bootstrap.sh --git
+./bootstrap.sh --ssh-key
+./bootstrap.sh --firewall
+./bootstrap.sh --security
 ```
 
-Доступные пункты меню:
+### `--all`
 
-1. полный bootstrap-сценарий;
-2. проверка установленных версий;
-3. установка и настройка Docker;
-4. настройка Git-идентичности;
-5. создание или вывод GitHub SSH-ключа;
-6. справка;
-7. выход без изменений.
+Запускает рекомендуемый полный сценарий:
 
-Можно выбрать несколько пунктов через пробел или запятую, например:
+1. Установка базовых пакетов.
+2. Установка Docker и Docker Compose plugin.
+3. Запуск Docker service.
+4. Добавление пользователя в группу `docker`.
+5. Создание GitHub SSH-ключа.
+6. Настройка Git identity.
+7. Настройка UFW firewall.
+8. Установка базовых security-пакетов.
+9. Финальная диагностика.
 
-```text
-3,5
+### `--check`
+
+Показывает отчет о состоянии сервера и ничего не меняет:
+
+- ОС;
+- наличие `apt`, `sudo`, `git`, `curl`;
+- Docker и Docker Compose;
+- статус Docker service;
+- Git identity;
+- наличие SSH public key;
+- членство пользователя в группе `docker`;
+- UFW/fail2ban status.
+
+### `--docker`
+
+Устанавливает Docker из официального репозитория Docker. Скрипт автоматически выбирает корректный repository URL для Ubuntu или Debian.
+
+### `--git`
+
+Настраивает глобальную Git identity.
+
+```bash
+./bootstrap.sh --git --git-name "Admin" --git-email "admin@example.com"
 ```
 
-## Параметры командной строки
+Также можно использовать переменные окружения:
 
-```text
-Usage: ./bootstrap.sh [OPTIONS]
-
-Options:
-  --help      Показать справку и выйти без изменений.
-  --all       Выполнить полный сценарий: базовые пакеты, Docker,
-              GitHub SSH-ключ, Git-идентичность и проверка версий.
-  --check     Показать версии Git, Docker и Docker Compose.
-  --docker    Установить Docker, проверить Docker daemon и добавить
-              пользователя в группу docker при необходимости.
-  --git       Настроить глобальные user.name и user.email для Git.
-  --ssh-key   Создать или вывести GitHub ed25519 SSH-ключ.
+```bash
+GIT_NAME="Admin" GIT_EMAIL="admin@example.com" ./bootstrap.sh --git
 ```
 
-Примеры:
+### `--ssh-key`
+
+Создает или показывает существующий SSH-ключ для GitHub.
+
+```bash
+./bootstrap.sh --ssh-key
+./bootstrap.sh --ssh-key --ssh-key-comment "deploy@app-01"
+./bootstrap.sh --ssh-key --ssh-key-path ~/.ssh/id_ed25519_github
+```
+
+### `--firewall`
+
+Устанавливает и включает UFW. SSH разрешается всегда перед включением firewall.
+
+```bash
+./bootstrap.sh --firewall
+./bootstrap.sh --firewall --allow-http --allow-https
+./bootstrap.sh --firewall --allow-port 8080/tcp
+```
+
+### `--security`
+
+Устанавливает базовые security-пакеты:
+
+- `fail2ban`;
+- `unattended-upgrades`;
+- `needrestart`.
+
+SSH hardening намеренно не выполняется этой командой, чтобы случайно не потерять доступ к серверу.
+
+## Глобальные опции
+
+```bash
+-y, --yes
+--dry-run
+--skip-upgrade
+-h, --help
+```
+
+### `--dry-run`
+
+Показывает, какие команды были бы выполнены, но не меняет систему.
+
+```bash
+./bootstrap.sh --dry-run --all
+./bootstrap.sh --dry-run --firewall --allow-http --allow-https
+```
+
+### `--skip-upgrade`
+
+Выполняет `apt update`, но пропускает `apt upgrade`.
+
+```bash
+./bootstrap.sh --all --skip-upgrade
+```
+
+## Рекомендуемый порядок запуска на новом сервере
 
 ```bash
 ./bootstrap.sh --check
-./bootstrap.sh --docker
-./bootstrap.sh --ssh-key
-./bootstrap.sh --docker --ssh-key
-./bootstrap.sh --git
+./bootstrap.sh --dry-run --all --skip-upgrade
+./bootstrap.sh --all --skip-upgrade
 ```
 
-## Полный сценарий `--all`
-
-Команда:
-
-```bash
-./bootstrap.sh --all
-```
-
-выполняет следующие шаги:
-
-1. проверяет наличие `root`-доступа или `sudo`;
-2. проверяет наличие `apt`;
-3. обновляет систему и устанавливает базовые пакеты;
-4. устанавливает Docker и плагины;
-5. проверяет состояние Docker daemon;
-6. добавляет пользователя в группу `docker`, если нужно;
-7. создаёт или показывает GitHub SSH-ключ;
-8. запрашивает и сохраняет глобальные имя и email для Git, если они ещё не настроены;
-9. выводит версии установленных инструментов;
-10. печатает следующие шаги для подключения GitHub и проверки Docker-доступа.
-
-## Настройка SSH-ключа GitHub
-
-Команда:
-
-```bash
-./bootstrap.sh --ssh-key
-```
-
-создаёт ключ:
-
-```text
-~/.ssh/id_ed25519
-~/.ssh/id_ed25519.pub
-```
-
-Если ключ уже есть, скрипт не перезаписывает его, а выводит текущий публичный ключ.
-
-После запуска:
-
-1. скопируйте публичный ключ из вывода скрипта;
-2. откройте GitHub → Settings → SSH and GPG keys;
-3. добавьте новый SSH key;
-4. проверьте подключение:
-
-```bash
-ssh -T git@github.com
-```
-
-После успешной проверки можно клонировать репозитории через SSH:
-
-```bash
-git clone git@github.com:OWNER/REPO.git
-```
-
-## Настройка Git-идентичности
-
-Команда:
-
-```bash
-./bootstrap.sh --git
-```
-
-проверяет глобальные значения:
-
-```bash
-git config --global user.name
-git config --global user.email
-```
-
-Если они уже заданы, скрипт покажет текущие значения и ничего не изменит. Если значения отсутствуют, скрипт интерактивно попросит ввести имя и email.
-
-Настроить их вручную можно так:
-
-```bash
-git config --global user.name "Your Name"
-git config --global user.email "you@example.com"
-```
-
-## Настройка Docker
-
-Команда:
-
-```bash
-./bootstrap.sh --docker
-```
-
-выполняет установку Docker и проверку сервиса. Если Docker уже установлен, скрипт не переустанавливает его, а показывает обнаруженную версию.
-
-После добавления пользователя в группу `docker` может потребоваться перелогиниться, чтобы права применились:
+После установки Docker и добавления пользователя в группу `docker` может потребоваться перелогиниться или выполнить:
 
 ```bash
 newgrp docker
 ```
 
-или просто завершить SSH-сессию и войти заново.
+## Troubleshooting
 
-Проверить Docker можно командами:
+### Docker permission denied
 
-```bash
-docker --version
-docker compose version
-docker info
-docker run hello-world
-```
-
-## Проверка версий
-
-Команда:
-
-```bash
-./bootstrap.sh --check
-```
-
-показывает версии Git, Docker и Docker Compose, если они доступны в системе.
-
-## Повторный запуск
-
-Скрипт можно запускать повторно:
-
-- существующий SSH-ключ не перезаписывается;
-- уже установленный Docker определяется автоматически;
-- пользователь не добавляется в группу `docker` повторно;
-- существующая Git-идентичность не перезаписывается без необходимости.
-
-## Возможные проблемы
-
-### `Need root or sudo installed.`
-
-Запустите скрипт от `root` или установите `sudo`.
-
-### `This script requires apt (Ubuntu/Debian).`
-
-Система не использует `apt`. Скрипт не рассчитан на Alpine, Fedora, CentOS, Arch Linux и другие дистрибутивы без `apt`.
-
-### Docker установлен, но `docker info` не работает
-
-Чаще всего текущий пользователь ещё не получил права группы `docker`. Выйдите из сессии и войдите снова или выполните:
+Если Docker установлен, но текущий пользователь не может выполнять `docker ps`, перелогиньтесь или выполните:
 
 ```bash
 newgrp docker
 ```
 
-Также можно перезапустить сервис:
+### SSH key already exists
+
+Скрипт не перезаписывает существующий ключ. Если ключ уже есть, он будет показан как существующий.
+
+### Unsupported distro
+
+Установка Docker поддерживает Ubuntu и Debian. Для других дистрибутивов скрипт завершится с понятной ошибкой.
+
+### Docker service is not running
+
+Проверьте статус:
 
 ```bash
+sudo systemctl status docker --no-pager
 sudo systemctl restart docker
 ```
 
-### `systemctl not found`
+## Проверки разработки
 
-Скрипт пропустит управление сервисом Docker. Такое возможно в минимальных контейнерах или окружениях без systemd.
-
-## Безопасность и важные замечания
-
-- Скрипт выполняет системные изменения: обновляет пакеты, добавляет apt-репозиторий Docker, устанавливает пакеты и меняет группы пользователя.
-- Перед запуском на production-сервере проверьте содержимое `bootstrap.sh`.
-- Приватный SSH-ключ остаётся в `~/.ssh/id_ed25519`; публиковать нужно только файл с расширением `.pub`.
-- Не передавайте приватный ключ третьим лицам и не вставляйте его в GitHub.
-
-## Структура репозитория
-
-```text
-.
-├── README.md      # Документация проекта
-└── bootstrap.sh   # Скрипт первичной настройки сервера
+```bash
+bash -n bootstrap.sh
+shellcheck bootstrap.sh
 ```
-
-## Лицензия
-
-Лицензия в репозитории не указана. Перед публичным распространением добавьте файл `LICENSE`, если он нужен вашему проекту.

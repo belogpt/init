@@ -2,31 +2,153 @@
 set -euo pipefail
 
 # =========================
-# Server bootstrap: git + docker + github ssh key + git identity
+# Server init CLI: git + docker + github ssh key + firewall + security basics
 # Works on Ubuntu/Debian (apt).
 # =========================
-
-bold() { printf "\033[1m%s\033[0m\n" "$*"; }
-ok()   { printf "✅ %s\n" "$*"; }
-warn() { printf "⚠️  %s\n" "$*"; }
-err()  { printf "❌ %s\n" "$*"; }
-
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 DRY_RUN=0
 ASSUME_YES=0
 SKIP_UPGRADE=0
+RUN_ALL=0
+DO_CHECK=0
+DO_DOCKER=0
+DO_GIT=0
+DO_SSH_KEY=0
+DO_FIREWALL=0
+DO_SECURITY=0
+ALLOW_HTTP=0
+ALLOW_HTTPS=0
+ALLOW_PORTS=()
+GIT_NAME="${GIT_NAME:-}"
+GIT_EMAIL="${GIT_EMAIL:-}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
+SSH_KEY_COMMENT="${SSH_KEY_COMMENT:-server-$(hostname)}"
 
-require_root_or_sudo() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ] && ! need_cmd sudo; then
-    err "Need root or sudo installed."
-    exit 1
+bold() { printf "\033[1m%s\033[0m\n" "$*"; }
+ok()   { printf "✅ %s\n" "$*"; }
+warn() { printf "⚠️  %s\n" "$*"; }
+err()  { printf "❌ %s\n" "$*" >&2; }
+info() { printf "ℹ️  %s\n" "$*"; }
+
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<'USAGE'
+Server init CLI for Ubuntu/Debian.
+
+Usage:
+  ./bootstrap.sh [commands] [options]
+
+Commands:
+  --all                  Run the full recommended setup: Docker, SSH key, Git, firewall, security, checks
+  --check                Show a server readiness report without changing the system
+  --docker               Install and configure Docker + Docker Compose plugin
+  --git                  Configure global git identity
+  --ssh-key              Create/show GitHub SSH key
+  --firewall             Install and enable UFW firewall
+  --security             Install basic security packages: fail2ban, unattended-upgrades, needrestart
+
+Global options:
+  -h, --help             Show this help
+  -y, --yes              Assume yes for supported prompts and apt operations
+  --dry-run              Print commands that would run without changing the system
+  --skip-upgrade         Run apt update, but skip apt upgrade
+
+Git options:
+  --git-name NAME        Set git config --global user.name
+  --git-email EMAIL      Set git config --global user.email
+                         You can also use GIT_NAME and GIT_EMAIL environment variables.
+
+SSH key options:
+  --ssh-key-path PATH    Path for the SSH key (default: ~/.ssh/id_ed25519)
+  --ssh-key-comment TEXT Comment for generated SSH key (default: server-<hostname>)
+
+Firewall options:
+  --allow-http           Allow inbound 80/tcp when --firewall is used
+  --allow-https          Allow inbound 443/tcp when --firewall is used
+  --allow-port PORT      Allow an extra UFW port rule, e.g. 8080/tcp. Can be repeated.
+
+Examples:
+  ./bootstrap.sh --check
+  ./bootstrap.sh --dry-run --all
+  ./bootstrap.sh --all --skip-upgrade
+  ./bootstrap.sh --docker
+  ./bootstrap.sh --git --git-name "Admin" --git-email "admin@example.com"
+  ./bootstrap.sh --ssh-key --ssh-key-comment "deploy@app-01"
+  ./bootstrap.sh --firewall --allow-http --allow-https
+  ./bootstrap.sh --security
+USAGE
+}
+
+parse_args() {
+  if [ "$#" -eq 0 ]; then
+    usage
+    exit 0
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -y|--yes) ASSUME_YES=1 ;;
+      --dry-run) DRY_RUN=1 ;;
+      --skip-upgrade) SKIP_UPGRADE=1 ;;
+      --all) RUN_ALL=1 ;;
+      --check) DO_CHECK=1 ;;
+      --docker) DO_DOCKER=1 ;;
+      --git) DO_GIT=1 ;;
+      --ssh-key) DO_SSH_KEY=1 ;;
+      --firewall) DO_FIREWALL=1 ;;
+      --security) DO_SECURITY=1 ;;
+      --allow-http) ALLOW_HTTP=1 ;;
+      --allow-https) ALLOW_HTTPS=1 ;;
+      --allow-port)
+        [ "$#" -ge 2 ] || { err "--allow-port requires a value."; exit 2; }
+        ALLOW_PORTS+=("$2")
+        shift
+        ;;
+      --git-name)
+        [ "$#" -ge 2 ] || { err "--git-name requires a value."; exit 2; }
+        GIT_NAME="$2"
+        shift
+        ;;
+      --git-email)
+        [ "$#" -ge 2 ] || { err "--git-email requires a value."; exit 2; }
+        GIT_EMAIL="$2"
+        shift
+        ;;
+      --ssh-key-path)
+        [ "$#" -ge 2 ] || { err "--ssh-key-path requires a value."; exit 2; }
+        SSH_KEY_PATH="$2"
+        shift
+        ;;
+      --ssh-key-comment)
+        [ "$#" -ge 2 ] || { err "--ssh-key-comment requires a value."; exit 2; }
+        SSH_KEY_COMMENT="$2"
+        shift
+        ;;
+      *) err "Unknown argument: $1"; echo; usage; exit 2 ;;
+    esac
+    shift
+  done
+
+  if [ "$RUN_ALL" -eq 1 ]; then
+    DO_DOCKER=1
+    DO_GIT=1
+    DO_SSH_KEY=1
+    DO_FIREWALL=1
+    DO_SECURITY=1
+    DO_CHECK=1
+  fi
+
+  if [ "$DO_CHECK$DO_DOCKER$DO_GIT$DO_SSH_KEY$DO_FIREWALL$DO_SECURITY" = "000000" ]; then
+    err "No command selected. Use --help to see available commands."
+    exit 2
   fi
 }
 
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf "Would run: %s\n" "$*"
+    info "Would run as root: $*"
     return 0
   fi
 
@@ -37,20 +159,68 @@ run() {
   fi
 }
 
+
+require_root_or_sudo() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${EUID:-$(id -u)}" -ne 0 ] && ! need_cmd sudo; then
+    err "Need root or sudo installed."
+    exit 1
+  fi
+}
+
 ensure_apt() {
   need_cmd apt || { err "This script requires apt (Ubuntu/Debian)."; exit 1; }
+}
+
+apt_install() {
+  run "DEBIAN_FRONTEND=noninteractive apt -y install $*"
 }
 
 install_base_packages() {
   bold "Updating system & installing base packages..."
   run "apt update"
   if [ "$SKIP_UPGRADE" -eq 1 ]; then
-    warn "Skipping apt upgrade because --skip-upgrade was provided."
+    warn "Skipping apt upgrade because --skip-upgrade is set."
   else
-    run "apt -y upgrade"
+    run "DEBIAN_FRONTEND=noninteractive apt -y upgrade"
   fi
-  run "apt -y install git ca-certificates curl gnupg lsb-release"
+  apt_install "git ca-certificates curl gnupg lsb-release"
   ok "Base packages installed."
+}
+
+detect_distro() {
+  if [ ! -r /etc/os-release ]; then
+    err "Cannot read /etc/os-release."
+    exit 1
+  fi
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  local distro_id="${ID:-}"
+  local codename="${VERSION_CODENAME:-}"
+
+  if [ -z "$codename" ]; then
+    codename="$(lsb_release -cs 2>/dev/null || true)"
+  fi
+
+  if [ -z "$distro_id" ] || [ -z "$codename" ]; then
+    err "Cannot determine distro id or codename."
+    exit 1
+  fi
+
+  case "$distro_id" in
+    ubuntu|debian)
+      DOCKER_REPO_URL="https://download.docker.com/linux/${distro_id}"
+      DISTRO_ID="$distro_id"
+      DISTRO_CODENAME="$codename"
+      ;;
+    *)
+      err "Unsupported distro for Docker install: $distro_id. Supported: ubuntu, debian."
+      exit 1
+      ;;
+  esac
 }
 
 install_docker() {
@@ -65,26 +235,22 @@ install_docker() {
   fi
 
   bold "Installing Docker (official repo)..."
+  detect_distro
+  info "Detected distro: ${DISTRO_ID} ${DISTRO_CODENAME}"
+  info "Docker repo: ${DOCKER_REPO_URL}"
 
+  run "for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do apt-get remove -y \$pkg >/dev/null 2>&1 || true; done"
   run "install -m 0755 -d /etc/apt/keyrings"
-  run "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
+  run "curl -fsSL ${DOCKER_REPO_URL}/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
   run "chmod a+r /etc/apt/keyrings/docker.gpg"
-
-  # Determine codename
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  local codename="${VERSION_CODENAME:-}"
-  if [ -z "$codename" ]; then
-    codename="$(lsb_release -cs 2>/dev/null || true)"
-  fi
-  if [ -z "$codename" ]; then
-    err "Cannot determine distro codename."
-    exit 1
-  fi
-
-  run "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $codename stable' > /etc/apt/sources.list.d/docker.list"
+  run "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_REPO_URL} ${DISTRO_CODENAME} stable' > /etc/apt/sources.list.d/docker.list"
   run "apt update"
-  run "apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+  apt_install "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    ok "Docker install plan completed (dry-run)."
+    return 0
+  fi
 
   ok "Docker installed: $(docker --version | head -n1)"
   ok "Docker Compose plugin: $(docker compose version | head -n1)"
@@ -93,12 +259,16 @@ install_docker() {
 ensure_docker_running() {
   bold "Checking Docker daemon..."
 
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "Would check, start, and enable Docker service."
+    return 0
+  fi
+
   if ! need_cmd systemctl; then
     warn "systemctl not found. Skipping docker service management."
     return 0
   fi
 
-  # Show current status briefly (non-fatal)
   run "systemctl status docker --no-pager -n 5 || true"
 
   if run "systemctl is-active --quiet docker"; then
@@ -108,17 +278,14 @@ ensure_docker_running() {
     run "systemctl start docker"
   fi
 
-  # Enable on boot
   run "systemctl enable docker"
 
-  # Socket check
   if [ -S /var/run/docker.sock ]; then
     ok "Docker socket exists: /var/run/docker.sock"
   else
     warn "Docker socket not found yet (may appear after service starts)."
   fi
 
-  # Daemon responsiveness check
   if docker info >/dev/null 2>&1; then
     ok "Docker daemon responding correctly (docker info OK)."
   else
@@ -129,7 +296,6 @@ ensure_docker_running() {
 }
 
 maybe_add_user_to_docker_group() {
-  # If run with sudo: add original user; else add current user.
   local target_user="${SUDO_USER:-${USER:-}}"
   if [ -z "$target_user" ]; then
     return 0
@@ -148,20 +314,28 @@ maybe_add_user_to_docker_group() {
 setup_github_ssh_key() {
   bold "GitHub SSH key setup (ed25519)..."
 
-  local key_path="${HOME}/.ssh/id_ed25519"
-  mkdir -p "${HOME}/.ssh"
-  chmod 700 "${HOME}/.ssh"
+  local key_path="${SSH_KEY_PATH/#\~/$HOME}"
+  local key_dir
+  key_dir="$(dirname "$key_path")"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "Would ensure SSH directory exists: $key_dir"
+    info "Would create SSH key if missing: $key_path"
+    info "Would use SSH key comment: $SSH_KEY_COMMENT"
+    return 0
+  fi
+
+  mkdir -p "$key_dir"
+  chmod 700 "$key_dir"
 
   if [ -f "$key_path" ]; then
     ok "SSH key already exists: $key_path"
   else
-    ssh-keygen -t ed25519 -C "server-$(hostname)" -f "$key_path" -N ""
+    ssh-keygen -t ed25519 -C "$SSH_KEY_COMMENT" -f "$key_path" -N ""
     ok "SSH key created: $key_path"
   fi
 
-  # Start ssh-agent and add key (best-effort)
   if need_cmd ssh-agent; then
-    # shellcheck disable=SC2046
     eval "$(ssh-agent -s)" >/dev/null 2>&1 || true
   fi
   if need_cmd ssh-add; then
@@ -182,30 +356,112 @@ configure_git_identity() {
   current_name="$(git config --global user.name || true)"
   current_email="$(git config --global user.email || true)"
 
-  if [ -n "$current_name" ] && [ -n "$current_email" ]; then
-    ok "Git identity already set:"
-    echo "  user.name  = $current_name"
-    echo "  user.email = $current_email"
-    return 0
+  if [ -z "$GIT_NAME" ]; then
+    GIT_NAME="$current_name"
+  fi
+  if [ -z "$GIT_EMAIL" ]; then
+    GIT_EMAIL="$current_email"
   fi
 
-  local name email
-  read -r -p "Enter git user.name: " name
-  read -r -p "Enter git user.email: " email
+  if [ -z "$GIT_NAME" ] && [ "$ASSUME_YES" -eq 0 ]; then
+    read -r -p "Enter git user.name: " GIT_NAME
+  fi
+  if [ -z "$GIT_EMAIL" ] && [ "$ASSUME_YES" -eq 0 ]; then
+    read -r -p "Enter git user.email: " GIT_EMAIL
+  fi
 
-  if [ -z "${name:-}" ] || [ -z "${email:-}" ]; then
+  if [ -z "${GIT_NAME:-}" ] || [ -z "${GIT_EMAIL:-}" ]; then
     warn "Skipped git identity (empty input). You can set later with:"
     echo "  git config --global user.name \"Your Name\""
     echo "  git config --global user.email \"you@example.com\""
     return 0
   fi
 
-  git config --global user.name "$name"
-  git config --global user.email "$email"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "Would run: git config --global user.name <provided>"
+    info "Would run: git config --global user.email <provided>"
+  else
+    git config --global user.name "$GIT_NAME"
+    git config --global user.email "$GIT_EMAIL"
+  fi
 
   ok "Git identity configured:"
-  echo "  user.name  = $(git config --global user.name)"
-  echo "  user.email = $(git config --global user.email)"
+  echo "  user.name  = $GIT_NAME"
+  echo "  user.email = $GIT_EMAIL"
+}
+
+configure_firewall() {
+  bold "Configuring UFW firewall..."
+  apt_install "ufw"
+  run "ufw allow OpenSSH"
+
+  if [ "$ALLOW_HTTP" -eq 1 ]; then
+    run "ufw allow 80/tcp"
+  fi
+  if [ "$ALLOW_HTTPS" -eq 1 ]; then
+    run "ufw allow 443/tcp"
+  fi
+  for port in "${ALLOW_PORTS[@]}"; do
+    run "ufw allow '$port'"
+  done
+
+  run "ufw --force enable"
+  run "ufw status verbose"
+  ok "Firewall configured."
+}
+
+configure_security() {
+  bold "Installing basic security packages..."
+  apt_install "fail2ban unattended-upgrades needrestart"
+
+  if need_cmd systemctl; then
+    run "systemctl enable --now fail2ban || true"
+    run "systemctl status fail2ban --no-pager -n 5 || true"
+  else
+    warn "systemctl not found. Skipping fail2ban service management."
+  fi
+
+  ok "Security packages installed."
+  warn "SSH hardening is intentionally not changed by this command to avoid locking you out."
+}
+
+check_system() {
+  bold "Server readiness check:"
+
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    ok "OS: ${PRETTY_NAME:-unknown}"
+  else
+    warn "OS: cannot read /etc/os-release"
+  fi
+
+  if need_cmd apt; then ok "apt: available"; else warn "apt: not found"; fi
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then ok "privileges: running as root"; elif need_cmd sudo; then ok "privileges: sudo available"; else warn "privileges: no root/sudo"; fi
+  if need_cmd git; then ok "git: $(git --version)"; else warn "git: not found"; fi
+  if need_cmd curl; then ok "curl: available"; else warn "curl: not found"; fi
+  if need_cmd docker; then ok "docker: $(docker --version | head -n1)"; else warn "docker: not found"; fi
+  if need_cmd docker && docker compose version >/dev/null 2>&1; then ok "docker compose: $(docker compose version | head -n1)"; else warn "docker compose: not found"; fi
+
+  if need_cmd systemctl; then
+    if systemctl is-active --quiet docker 2>/dev/null; then ok "docker service: active"; else warn "docker service: not active or unavailable"; fi
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then ok "fail2ban service: active"; else warn "fail2ban service: not active or unavailable"; fi
+  else
+    warn "systemctl: not found"
+  fi
+
+  local current_name current_email
+  current_name="$(git config --global user.name || true)"
+  current_email="$(git config --global user.email || true)"
+  if [ -n "$current_name" ] && [ -n "$current_email" ]; then ok "git identity: $current_name <$current_email>"; else warn "git identity: incomplete"; fi
+
+  local key_path="${SSH_KEY_PATH/#\~/$HOME}"
+  if [ -f "${key_path}.pub" ]; then ok "SSH public key: ${key_path}.pub"; else warn "SSH public key: not found at ${key_path}.pub"; fi
+
+  local target_user="${SUDO_USER:-${USER:-}}"
+  if [ -n "$target_user" ] && id -nG "$target_user" 2>/dev/null | grep -qw docker; then ok "docker group: '$target_user' is a member"; else warn "docker group: target user is not a member"; fi
+
+  if need_cmd ufw; then run "ufw status verbose || true"; else warn "ufw: not installed"; fi
 }
 
 show_versions() {
@@ -219,204 +475,50 @@ show_versions() {
   fi
 }
 
-usage() {
-  cat <<'EOF'
-Usage: ./bootstrap.sh [OPTIONS]
-
-Server bootstrap helper for Ubuntu/Debian. Run one or more operations explicitly,
-or run without arguments to choose operations from an interactive menu.
-
-Options:
-  --help          Show this help message and exit without changes.
-  --dry-run       Print commands that would be run without executing them.
-  --yes, -y       Assume yes for future confirmations and non-interactive use.
-  --skip-upgrade  Run apt update and package installation, but skip apt upgrade.
-  --all           Run the full bootstrap scenario: base packages, Docker,
-              GitHub SSH key, git identity, and version checks.
-  --check         Show installed git/Docker versions only.
-  --docker        Install Docker, ensure the Docker daemon is running, and add
-                  the current/sudo user to the docker group when needed.
-  --git           Configure global git identity (user.name / user.email).
-  --ssh-key       Create or show a GitHub ed25519 SSH key.
-
-Examples:
-  ./bootstrap.sh
-  ./bootstrap.sh --all
-  ./bootstrap.sh --docker --ssh-key
-  ./bootstrap.sh --check
-EOF
-}
-
-show_menu() {
-  cat <<'EOF'
-
-Select bootstrap operations to run:
-  1) Full bootstrap (--all)
-  2) Check installed versions (--check)
-  3) Install/configure Docker (--docker)
-  4) Configure git identity (--git)
-  5) Create/show GitHub SSH key (--ssh-key)
-  h) Show help
-  0) Exit without changes
-
-Enter one or more numbers separated by spaces or commas.
-Example: 3,5
-EOF
-}
-
-RUN_ALL=0
-RUN_CHECK=0
-RUN_DOCKER=0
-RUN_GIT=0
-RUN_SSH_KEY=0
-
-parse_menu_choice() {
-  local choice token
-
-  show_menu
-  printf "Choice: "
-  if ! IFS= read -r choice; then
-    echo
-    warn "No input received. Exiting without changes."
-    exit 0
-  fi
-
-  choice="${choice//,/ }"
-  for token in $choice; do
-    case "$token" in
-      1|all|--all)
-        RUN_ALL=1
-        ;;
-      2|check|--check)
-        RUN_CHECK=1
-        ;;
-      3|docker|--docker)
-        RUN_DOCKER=1
-        ;;
-      4|git|--git)
-        RUN_GIT=1
-        ;;
-      5|ssh-key|--ssh-key)
-        RUN_SSH_KEY=1
-        ;;
-      h|help|--help)
-        usage
-        exit 0
-        ;;
-      0|q|quit|exit)
-        ok "No changes requested."
-        exit 0
-        ;;
-      *)
-        err "Unknown menu option: $token"
-        echo
-        show_menu
-        exit 1
-        ;;
-    esac
-  done
-
-  if [ "$RUN_ALL" -eq 0 ] \
-    && [ "$RUN_CHECK" -eq 0 ] \
-    && [ "$RUN_DOCKER" -eq 0 ] \
-    && [ "$RUN_GIT" -eq 0 ] \
-    && [ "$RUN_SSH_KEY" -eq 0 ]; then
-    warn "No operations selected. Exiting without changes."
-    exit 0
-  fi
-}
-
-parse_args() {
-  if [ "$#" -eq 0 ]; then
-    parse_menu_choice
-    return 0
-  fi
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --help)
-        usage
-        exit 0
-        ;;
-      --dry-run)
-        DRY_RUN=1
-        ;;
-      --yes|-y)
-        ASSUME_YES=1
-        ;;
-      --skip-upgrade)
-        SKIP_UPGRADE=1
-        ;;
-      --all)
-        RUN_ALL=1
-        ;;
-      --check)
-        RUN_CHECK=1
-        ;;
-      --docker)
-        RUN_DOCKER=1
-        ;;
-      --git)
-        RUN_GIT=1
-        ;;
-      --ssh-key)
-        RUN_SSH_KEY=1
-        ;;
-      *)
-        err "Unknown option: $1"
-        echo
-        usage
-        exit 1
-        ;;
-    esac
-    shift
-  done
-}
-
 main() {
-  if [ "$RUN_ALL" -eq 1 ]; then
-    require_root_or_sudo
-    ensure_apt
+  parse_args "$@"
 
-    install_base_packages
-    install_docker
-    ensure_docker_running
-    maybe_add_user_to_docker_group
-    setup_github_ssh_key
-    configure_git_identity
-    show_versions
-
-    bold "Done."
-    echo "Next steps:"
-    echo "  1) Add the printed SSH public key to GitHub."
-    echo "  2) Test: ssh -T git@github.com"
-    echo "  3) Clone via SSH: git clone git@github.com:OWNER/REPO.git"
-    echo "  4) If docker access denied after group add: log out/in or run: newgrp docker"
+  if [ "$DO_CHECK" -eq 1 ] && [ "$RUN_ALL" -eq 0 ] && [ "$DO_DOCKER$DO_GIT$DO_SSH_KEY$DO_FIREWALL$DO_SECURITY" = "00000" ]; then
+    check_system
     return 0
   fi
 
-  if [ "$RUN_DOCKER" -eq 1 ]; then
-    require_root_or_sudo
-    ensure_apt
+  require_root_or_sudo
+  ensure_apt
+
+  if [ "$DO_DOCKER" -eq 1 ] || [ "$DO_FIREWALL" -eq 1 ] || [ "$DO_SECURITY" -eq 1 ]; then
+    install_base_packages
+  fi
+
+  if [ "$DO_DOCKER" -eq 1 ]; then
     install_docker
     ensure_docker_running
     maybe_add_user_to_docker_group
   fi
-
-  if [ "$RUN_SSH_KEY" -eq 1 ]; then
+  if [ "$DO_SSH_KEY" -eq 1 ]; then
     setup_github_ssh_key
   fi
-
-  if [ "$RUN_GIT" -eq 1 ]; then
+  if [ "$DO_GIT" -eq 1 ]; then
     configure_git_identity
   fi
+  if [ "$DO_FIREWALL" -eq 1 ]; then
+    configure_firewall
+  fi
+  if [ "$DO_SECURITY" -eq 1 ]; then
+    configure_security
+  fi
 
-  if [ "$RUN_CHECK" -eq 1 ]; then
-    show_versions
+  show_versions
+  if [ "$DO_CHECK" -eq 1 ]; then
+    check_system
   fi
 
   bold "Done."
+  echo "Next steps:"
+  echo "  1) If a public key was printed, add it to GitHub."
+  echo "  2) Test GitHub SSH: ssh -T git@github.com"
+  echo "  3) Clone via SSH: git clone git@github.com:OWNER/REPO.git"
+  echo "  4) If docker access is denied after group add: log out/in or run: newgrp docker"
 }
 
-parse_args "$@"
-main
+main "$@"
