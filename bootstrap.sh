@@ -205,24 +205,192 @@ show_versions() {
   fi
 }
 
-main() {
-  require_root_or_sudo
-  ensure_apt
+usage() {
+  cat <<'EOF'
+Usage: ./bootstrap.sh [OPTIONS]
 
-  install_base_packages
-  install_docker
-  ensure_docker_running
-  maybe_add_user_to_docker_group
-  setup_github_ssh_key
-  configure_git_identity
-  show_versions
+Server bootstrap helper for Ubuntu/Debian. Run one or more operations explicitly,
+or run without arguments to choose operations from an interactive menu.
 
-  bold "Done."
-  echo "Next steps:"
-  echo "  1) Add the printed SSH public key to GitHub."
-  echo "  2) Test: ssh -T git@github.com"
-  echo "  3) Clone via SSH: git clone git@github.com:OWNER/REPO.git"
-  echo "  4) If docker access denied after group add: log out/in or run: newgrp docker"
+Options:
+  --help      Show this help message and exit without changes.
+  --all       Run the full bootstrap scenario: base packages, Docker,
+              GitHub SSH key, git identity, and version checks.
+  --check     Show installed git/Docker versions only.
+  --docker    Install Docker, ensure the Docker daemon is running, and add
+              the current/sudo user to the docker group when needed.
+  --git       Configure global git identity (user.name / user.email).
+  --ssh-key   Create or show a GitHub ed25519 SSH key.
+
+Examples:
+  ./bootstrap.sh
+  ./bootstrap.sh --all
+  ./bootstrap.sh --docker --ssh-key
+  ./bootstrap.sh --check
+EOF
 }
 
-main "$@"
+show_menu() {
+  cat <<'EOF'
+
+Select bootstrap operations to run:
+  1) Full bootstrap (--all)
+  2) Check installed versions (--check)
+  3) Install/configure Docker (--docker)
+  4) Configure git identity (--git)
+  5) Create/show GitHub SSH key (--ssh-key)
+  h) Show help
+  0) Exit without changes
+
+Enter one or more numbers separated by spaces or commas.
+Example: 3,5
+EOF
+}
+
+RUN_ALL=0
+RUN_CHECK=0
+RUN_DOCKER=0
+RUN_GIT=0
+RUN_SSH_KEY=0
+
+parse_menu_choice() {
+  local choice token
+
+  show_menu
+  printf "Choice: "
+  if ! IFS= read -r choice; then
+    echo
+    warn "No input received. Exiting without changes."
+    exit 0
+  fi
+
+  choice="${choice//,/ }"
+  for token in $choice; do
+    case "$token" in
+      1|all|--all)
+        RUN_ALL=1
+        ;;
+      2|check|--check)
+        RUN_CHECK=1
+        ;;
+      3|docker|--docker)
+        RUN_DOCKER=1
+        ;;
+      4|git|--git)
+        RUN_GIT=1
+        ;;
+      5|ssh-key|--ssh-key)
+        RUN_SSH_KEY=1
+        ;;
+      h|help|--help)
+        usage
+        exit 0
+        ;;
+      0|q|quit|exit)
+        ok "No changes requested."
+        exit 0
+        ;;
+      *)
+        err "Unknown menu option: $token"
+        echo
+        show_menu
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ "$RUN_ALL" -eq 0 ] \
+    && [ "$RUN_CHECK" -eq 0 ] \
+    && [ "$RUN_DOCKER" -eq 0 ] \
+    && [ "$RUN_GIT" -eq 0 ] \
+    && [ "$RUN_SSH_KEY" -eq 0 ]; then
+    warn "No operations selected. Exiting without changes."
+    exit 0
+  fi
+}
+
+parse_args() {
+  if [ "$#" -eq 0 ]; then
+    parse_menu_choice
+    return 0
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --help)
+        usage
+        exit 0
+        ;;
+      --all)
+        RUN_ALL=1
+        ;;
+      --check)
+        RUN_CHECK=1
+        ;;
+      --docker)
+        RUN_DOCKER=1
+        ;;
+      --git)
+        RUN_GIT=1
+        ;;
+      --ssh-key)
+        RUN_SSH_KEY=1
+        ;;
+      *)
+        err "Unknown option: $1"
+        echo
+        usage
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+main() {
+  if [ "$RUN_ALL" -eq 1 ]; then
+    require_root_or_sudo
+    ensure_apt
+
+    install_base_packages
+    install_docker
+    ensure_docker_running
+    maybe_add_user_to_docker_group
+    setup_github_ssh_key
+    configure_git_identity
+    show_versions
+
+    bold "Done."
+    echo "Next steps:"
+    echo "  1) Add the printed SSH public key to GitHub."
+    echo "  2) Test: ssh -T git@github.com"
+    echo "  3) Clone via SSH: git clone git@github.com:OWNER/REPO.git"
+    echo "  4) If docker access denied after group add: log out/in or run: newgrp docker"
+    return 0
+  fi
+
+  if [ "$RUN_DOCKER" -eq 1 ]; then
+    require_root_or_sudo
+    ensure_apt
+    install_docker
+    ensure_docker_running
+    maybe_add_user_to_docker_group
+  fi
+
+  if [ "$RUN_SSH_KEY" -eq 1 ]; then
+    setup_github_ssh_key
+  fi
+
+  if [ "$RUN_GIT" -eq 1 ]; then
+    configure_git_identity
+  fi
+
+  if [ "$RUN_CHECK" -eq 1 ]; then
+    show_versions
+  fi
+
+  bold "Done."
+}
+
+parse_args "$@"
+main
