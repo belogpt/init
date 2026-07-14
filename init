@@ -18,107 +18,136 @@ trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
 
 usage() {
   cat <<'USAGE'
-Usage: init [GLOBAL FLAGS] COMMAND [OPTIONS]
-
-Modular VPS bootstrap tool for Ubuntu/Debian.
+Usage: init [GLOBAL FLAGS] COMMAND [MODULE...] [OPTIONS]
 
 Commands:
-  help       Show this help without changing the system.
-  version    Show tool version.
-  check      Inspect current state without changing the system.
-  plan       Show planned changes without changing the system.
-  apply      Apply the bootstrap plan idempotently.
+  help       Show help.             modules    List module registry.
+  version    Show tool version.     check      Inspect selected modules.
+  plan       Show selected plan.     apply      Apply selected modules.
 
 Global flags:
-  --no-color       Disable colored output.
-  --debug          Enable debug logs.
-  --yes, -y        Assume yes for package manager prompts.
-  --skip-upgrade   Skip apt upgrade during apply.
+  --target-user USER  User for git/ssh user-context modules.
+  --no-color          Disable colored output.
+  --debug             Enable debug logs.
+  --yes, -y           Assume yes for package manager prompts.
+  --upgrade           Run apt upgrade in packages module.
+  --skip-upgrade      Deprecated no-op; upgrade is skipped by default.
 
-Apply options:
-  --git-name NAME       Configure global git user.name.
-  --git-email EMAIL     Configure global git user.email.
+Options:
+  --git-name NAME       Configure target user's global git user.name.
+  --git-email EMAIL     Configure target user's global git user.email.
   --ssh-key-path PATH   SSH private key path (default: ~/.ssh/id_ed25519).
-  --ssh-key-comment TXT SSH key comment (default: server-<hostname>).
+  --ssh-key-comment TXT SSH key comment.
   --allow-http          Allow TCP port 80 in UFW.
   --allow-https         Allow TCP port 443 in UFW.
-  --allow-port PORT/PROTO
-                        Allow a custom UFW port rule. Repeatable.
-
-Legacy bootstrap.sh flags are mapped where possible:
-  --help -> help, --check -> check, --all -> apply.
+  --allow-port PORT/PROTO (1-65535 tcp|udp). Repeatable.
 USAGE
 }
 
-load_modules() {
-  local module
-  for module in "${INIT_MODULES[@]}"; do
-    # shellcheck source=modules/system.sh
-    . "${APP_DIR}/modules/${module}.sh"
-  done
-}
+is_command() { case "$1" in help|version|modules|check|plan|apply) return 0;; *) return 1;; esac; }
+module_exists() { local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do [ "$m" = "$1" ] && return 0; done; return 1; }
 
 validate_port_rule() {
-  if [[ ! "$1" =~ ^[0-9]+/(tcp|udp)$ ]]; then
-    log_error "--allow-port must use PORT/PROTO, for example 8080/tcp or 53/udp"
-    return 1
-  fi
+  [[ "$1" =~ ^([0-9]+)/(tcp|udp)$ ]] || { log_error "--allow-port must use PORT/PROTO, for example 8080/tcp or 53/udp"; return 2; }
+  local port="${BASH_REMATCH[1]}"
+  [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] || { log_error "--allow-port port must be in range 1-65535"; return 2; }
 }
 
+expect_value() { [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || { log_error "$1 requires a value"; return 2; }; }
+
 parse_args() {
-  COMMAND=""
+  COMMAND=""; REQUESTED_MODULES=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --no-color) INIT_NO_COLOR=1; logging_init ;;
       --debug) INIT_DEBUG=1 ;;
       --yes|-y) ASSUME_YES=1 ;;
-      --skip-upgrade) SKIP_UPGRADE=1 ;;
-      --help) COMMAND="help" ;;
-      --check) COMMAND="check" ;;
-      --all) COMMAND="apply" ;;
-      --docker|--git|--ssh-key|--firewall|--security)
-        COMMAND="apply"
-        log_warn "Legacy selector $1 is accepted, but init apply currently executes the system module plan."
-        ;;
-      help|version|check|plan|apply) COMMAND="$1" ;;
-      --git-name) shift; [ "$#" -gt 0 ] || { log_error "--git-name requires a value"; return 1; }; GIT_NAME="$1" ;;
-      --git-email) shift; [ "$#" -gt 0 ] || { log_error "--git-email requires a value"; return 1; }; GIT_EMAIL="$1" ;;
-      --ssh-key-path) shift; [ "$#" -gt 0 ] || { log_error "--ssh-key-path requires a value"; return 1; }; SSH_KEY_PATH="$1" ;;
-      --ssh-key-comment) shift; [ "$#" -gt 0 ] || { log_error "--ssh-key-comment requires a value"; return 1; }; SSH_KEY_COMMENT="$1" ;;
+      --upgrade) UPGRADE=1 ;;
+      --skip-upgrade) log_warn "--skip-upgrade is deprecated and is now a no-op; apt upgrade is skipped unless --upgrade is set" ;;
+      --target-user) expect_value "$1" "${2:-}"; TARGET_USER="$2"; shift ;;
+      --help) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and help"; return 2; }; COMMAND=help ;;
+      --check) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and check"; return 2; }; COMMAND=check ;;
+      --all) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and apply"; return 2; }; COMMAND=apply ;;
+      --git-name) expect_value "$1" "${2:-}"; GIT_NAME="$2"; shift ;;
+      --git-email) expect_value "$1" "${2:-}"; GIT_EMAIL="$2"; shift ;;
+      --ssh-key-path) expect_value "$1" "${2:-}"; SSH_KEY_PATH="$2"; shift ;;
+      --ssh-key-comment) expect_value "$1" "${2:-}"; SSH_KEY_COMMENT="$2"; shift ;;
       --allow-http) ALLOW_HTTP=1 ;;
       --allow-https) ALLOW_HTTPS=1 ;;
-      --allow-port) shift; [ "$#" -gt 0 ] || { log_error "--allow-port requires PORT/PROTO"; return 1; }; validate_port_rule "$1"; ALLOW_PORTS+=("$1") ;;
-      *) log_error "Unknown command or option: $1"; return 2 ;;
+      --allow-port) expect_value "$1" "${2:-}"; validate_port_rule "$2"; ALLOW_PORTS+=("$2"); shift ;;
+      --*) log_error "Unknown command or option: $1"; return 2 ;;
+      *)
+        if is_command "$1"; then
+          [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and $1"; return 2; }
+          COMMAND="$1"
+        else
+          REQUESTED_MODULES+=("$1")
+        fi
+        ;;
     esac
     shift
   done
-  COMMAND="${COMMAND:-help}"
+  if [ -z "${COMMAND}" ]; then
+    if [ "${#REQUESTED_MODULES[@]}" -gt 0 ]; then log_error "Unknown command or option: ${REQUESTED_MODULES[0]}"; return 2; fi
+    COMMAND="help"
+  fi
 }
 
+load_modules() { local module; for module in "${INIT_REGISTERED_MODULES[@]}"; do . "${APP_DIR}/modules/${module}.sh"; done; }
+
+resolve_modules() {
+  RESOLVED_MODULES=(); local seen=" " input module dep
+  local inputs=("${REQUESTED_MODULES[@]}")
+  if [ "${#inputs[@]}" -eq 0 ]; then for module in "${INIT_REGISTERED_MODULES[@]}"; do [ "${INIT_MODULE_DEFAULTS[$module]}" = 1 ] && inputs+=("$module"); done; fi
+  _add_module() {
+    local m="$1" d
+    module_exists "$m" || { log_error "Unknown module: $m"; return 2; }
+    [[ "$seen" == *" $m "* ]] && return 0
+    seen+="$m "
+    for d in ${INIT_MODULE_DEPS[$m]}; do _add_module "$d"; done
+    RESOLVED_MODULES+=("$m")
+  }
+  for input in "${inputs[@]}"; do _add_module "$input"; done
+}
+
+cmd_modules() { printf '%-12s %-8s %-18s %s\n' Module Default Dependencies Description; local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do printf '%-12s %-8s %-18s %s\n' "$m" "${INIT_MODULE_DEFAULTS[$m]}" "${INIT_MODULE_DEPS[$m]:--}" "${INIT_MODULE_DESCRIPTIONS[$m]}"; done; }
+
 run_modules() {
-  local action="$1" module fn
-  for module in "${INIT_MODULES[@]}"; do
+  local action="$1" module fn rc overall=0 statuses=()
+  resolve_modules
+  for module in "${RESOLVED_MODULES[@]}"; do
     fn="${module}_module_${action}"
-    if declare -F "${fn}" >/dev/null 2>&1; then
-      "${fn}"
+    declare -F "${fn}" >/dev/null 2>&1 || { log_error "Module ${module} does not implement ${action}"; return 2; }
+    trap - ERR; set +e; "${fn}"; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+    if [ "${action}" = check ]; then
+      statuses+=("${module}:$(module_status_text "$rc")")
+      if [ "$rc" -ge 2 ]; then overall=2; elif [ "$rc" -eq 1 ] && [ "$overall" -eq 0 ]; then overall=1; fi
     else
-      log_error "Module ${module} does not implement ${action}"
-      return 1
+      statuses+=("${module}:done")
+      [ "$rc" -eq 0 ] || overall="$rc"
     fi
   done
+  printf '\n%-12s %s\n' Module Status
+  for module in "${statuses[@]}"; do printf '%-12s %s\n' "${module%%:*}" "${module#*:}"; done
+  return "$overall"
 }
 
 main() {
-  parse_args "$@"
+  set +e; parse_args "$@"; local rc=$?; set -e; [ "$rc" -eq 0 ] || return "$rc"
   load_modules
+  set +e
   case "${COMMAND}" in
     help) usage ;;
     version) printf '%s\n' "${INIT_VERSION}" ;;
+    modules) cmd_modules ;;
     check) run_modules check ;;
     plan) run_modules plan ;;
     apply) run_modules apply ;;
-    *) log_error "Unknown command: ${COMMAND}"; return 2 ;;
+    *) log_error "Unknown command or option: ${COMMAND}"; rc=2 ;;
   esac
+  rc=$?
+  set -e
+  return "$rc"
 }
 
 main "$@"

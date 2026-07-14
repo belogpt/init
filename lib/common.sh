@@ -8,13 +8,6 @@ init_error_trap() {
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-require_root_or_sudo() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ] && ! need_cmd sudo; then
-    log_error "Need root or sudo installed."
-    return 1
-  fi
-}
-
 run_root() {
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     "$@"
@@ -42,4 +35,12 @@ all_debs_installed() {
   for package in "$@"; do
     is_deb_installed "${package}" || return 1
   done
+}
+
+module_status_text() {
+  case "$1" in
+    0) printf 'configured' ;;
+    1) printf 'needs changes' ;;
+    *) printf 'check failed' ;;
+  esac
 }

@@ -1,108 +1,76 @@
-# VPS Init Bootstrap
+# Modular VPS Init
 
-`init` is a modular Bash bootstrap tool for the first setup of an empty VPS. The repository keeps `bootstrap.sh` as a tiny entry point, while the real CLI, shared libraries, and server setup modules are split into separate files.
+A Bash-first initial VPS setup tool for Ubuntu and Debian. `bootstrap.sh` is a minimal compatibility entry point; `init` is the main CLI.
 
-> Test this on a disposable VPS before using it on a production server. The `apply` command installs packages and changes system services, firewall rules, Git settings, and SSH keys.
-
-## Supported operating systems
-
-The tool is intended for apt-based Linux distributions already supported by the previous script:
-
-- Ubuntu;
-- Debian.
-
-Docker repository setup is selected from `/etc/os-release` and uses the official Docker apt repository for Ubuntu or Debian.
-
-## Project structure
+## Structure
 
 ```text
-init/
-├── bootstrap.sh          # Minimal compatibility entry point; delegates to ./init.
-├── init                  # Main CLI dispatcher.
-├── config/
-│   └── default.conf      # Defaults for modules and package lists.
-├── lib/
-│   ├── common.sh         # Shared command, root/sudo, apt, and error helpers.
-│   ├── logging.sh        # Unified color-aware logging functions.
-│   ├── platform.sh       # OS detection and Ubuntu/Debian validation.
-│   └── state.sh          # Small state/path helpers.
-├── modules/
-│   └── system.sh         # Current server bootstrap module.
-└── tests/                # Reserved for future automated tests.
+config/default.conf      defaults and explicit module registry
+lib/                     logging, platform, common, state/target-user helpers
+modules/system.sh        platform preflight only
+modules/packages.sh      base apt packages and optional upgrade
+modules/docker.sh        Docker Engine and Compose plugin
+modules/git.sh           target-user Git identity
+modules/ssh_key.sh       target-user SSH key
+modules/firewall.sh      UFW rules
+modules/security.sh      security packages
 ```
 
-## Commands
+## Module registry and selection
 
-| Command | Purpose | Changes system? |
-| --- | --- | --- |
-| `./init help` | Show help. | No |
-| `./init version` | Print version. | No |
-| `./init check` | Inspect OS, packages, Git, SSH key, Docker, UFW, and fail2ban state. | No |
-| `./init plan` | Show the actions that `apply` would perform. | No |
-| `./init apply` | Apply the bootstrap plan idempotently. | Yes |
-
-Global flags:
-
-- `--no-color` disables colors. Colors are also disabled automatically when stdout is not a TTY or when `NO_COLOR` is set.
-- `--debug` enables debug logs.
-- `--yes` / `-y` passes non-interactive confirmation to apt where appropriate.
-- `--skip-upgrade` skips `apt upgrade` during `apply`.
-
-Apply options retained from the previous bootstrap flow:
-
-- `--git-name NAME`
-- `--git-email EMAIL`
-- `--ssh-key-path PATH`
-- `--ssh-key-comment TEXT`
-- `--allow-http`
-- `--allow-https`
-- `--allow-port PORT/PROTO`
-
-## Module contract
-
-Each module must implement three functions:
+List registered modules, descriptions, defaults, and dependencies:
 
 ```bash
-<module>_module_check
-<module>_module_plan
-<module>_module_apply
+./init modules
 ```
 
-The CLI loads modules listed in `config/default.conf` and calls the requested operation. Adding another independent module should only require adding its file under `modules/` and including its module name in `INIT_MODULES`.
-
-## Example usage
+`check`, `plan`, and `apply` accept optional module names. If no module is specified, every module enabled by default is selected. Dependencies are resolved deterministically and each module is run once even if requested repeatedly.
 
 ```bash
-chmod +x bootstrap.sh init
-./init help
-./init check
-./init plan
-sudo ./init apply --yes --git-name "Your Name" --git-email you@example.com
+./init check docker
+./init plan packages docker
+./init apply packages docker
 ```
 
-Compatibility entry point:
+Unknown modules fail with exit code `2`.
+
+## Target user
+
+User-context modules (`git` and `ssh_key`) act on a **target user**, selected in this order:
+
+1. `--target-user USER`.
+2. `SUDO_USER` when running through `sudo`.
+3. Current user when not running as root.
+4. No implicit target when running directly as root.
+
+This prevents `sudo ./init apply git ssh_key` from silently modifying `/root` when the intended user is a normal account. Configuring root is allowed only explicitly:
 
 ```bash
-./bootstrap.sh help
-./bootstrap.sh --check
-./bootstrap.sh --all --yes
+sudo ./init apply git ssh_key --target-user root
 ```
 
-## Safety notes
+Home directories are read from system account data (`getent passwd`), not from the caller's `HOME`.
 
-- `check` and `plan` are read-only by design.
-- `apply` skips work that is already complete where practical: installed package sets, existing Docker/Compose, existing SSH key, existing Git identity, and existing docker group membership.
-- The scripts do not use `eval` and quote variables deliberately.
-- Remote code is not executed directly. The Docker GPG key is downloaded from the official Docker repository and stored as an apt keyring before packages are installed through apt.
+## Upgrade behavior
 
-## Local verification
+`apt upgrade` is disabled by default. Use `--upgrade` to make `packages` plan and apply a full upgrade. The deprecated `--skip-upgrade` flag is accepted as a no-op warning for compatibility.
 
-Recommended checks before committing changes:
+## Safe examples
 
 ```bash
-bash -n bootstrap.sh init lib/*.sh modules/*.sh
-shellcheck bootstrap.sh init lib/*.sh modules/*.sh
-./init help
-./init check
-./init plan
+./init plan packages docker
+./init apply packages docker --upgrade
+sudo ./init apply git ssh_key --target-user deploy \
+  --git-name "Deploy User" \
+  --git-email deploy@example.com
+```
+
+Check and plan do not require root and do not call mutating system commands. Apply uses privilege escalation only around system-changing commands.
+
+## Development checks
+
+```bash
+bash -n init lib/*.sh modules/*.sh tests.sh
+shellcheck init bootstrap.sh lib/*.sh modules/*.sh tests.sh
+./tests.sh
 ```
