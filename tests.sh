@@ -71,4 +71,40 @@ if [ ! -s "$MOCK_LOG" ]; then echo 'ok - config did not mutate'; pass=$((pass+1)
 run "json output valid" 0 bash -c '"$0" check packages --format json | python3 -m json.tool >/dev/null' "$ROOT/init"
 run "check text no mutation" 0 "$ROOT/init" check packages
 run "plan json no mutation" 0 bash -c '"$0" plan packages --format json | python3 -m json.tool >/dev/null' "$ROOT/init"
+run "menu exits with zero" 0 bash -c "printf '0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+run "no args non tty shows help" 0 bash -c "'$ROOT/init' < /dev/null"
+run "menu rejects json" 2 "$ROOT/init" menu --format json
+run "invalid menu number continues" 0 bash -c "printf '99\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+run "menu EOF exits" 0 bash -c "printf '' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+run "menu modules generated from registry" 0 bash -c "printf '4\\n0\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "module menu includes docker" 'docker - Install Docker' "$TMP/out"
+run "select docker adds dependencies" 0 bash -c "printf '4\\nn\\n3\\nc\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "dependency selected automatically" 'dependencies were selected automatically' "$TMP/out"
+run "cancel module selection returns" 0 bash -c "printf '4\\nn\\n0\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+run "edit target user updates config" 0 bash -c "printf '5\\n1\\nbob\\n0\\n6\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "target user is bob" 'Target user:[[:space:]]+bob' "$TMP/out"
+run "root target needs confirmation" 0 bash -c "printf '5\\n1\\nroot\\nn\\n0\\n6\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "root not selected" 'Root not selected' "$TMP/out"
+run "invalid port rejected" 0 bash -c "printf '5\\n8\\na\\nbad\\n0\\n0\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "invalid port message" 'Invalid or duplicate port' "$TMP/out"
+run "duplicate port rejected" 0 bash -c "printf '5\\n8\\na\\n8080/tcp\\na\\n8080/tcp\\n0\\n0\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "duplicate port message" 'Invalid or duplicate port' "$TMP/out"
+run "port can be removed" 0 bash -c "printf '5\\n8\\na\\n8080/tcp\\nr\\n1\\n0\\n0\\n6\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+run "plan from menu no mutation" 0 bash -c "printf '2\\n4\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu packages"
+run "apply negative confirmation cancels" 0 bash -c "printf '3\\nn\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu packages"
+contains "apply cancelled" 'Apply cancelled' "$TMP/out"
+if ! grep -q '^apt update' "$MOCK_LOG"; then echo 'ok - negative apply did not mutate'; pass=$((pass+1)); else echo 'not ok - negative apply mutated'; fail=$((fail+1)); fi
+SAVED="$TMP/saved.conf"; run "save config creates file" 0 bash -c "printf '9\\n$SAVED\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' --target-user alice --allow-port 8080/tcp menu"
+[ -f "$SAVED" ] && echo 'ok - saved config file exists' && pass=$((pass+1)) || { echo 'not ok - saved config missing'; fail=$((fail+1)); }
+contains "saved config has repair" '^repair_permissions=' "$SAVED"
+run "save config no overwrite" 0 bash -c "printf '9\\n$SAVED\\nn\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+LOAD="$TMP/load.conf"; printf 'target_user=alice\nmodules=git\nrepair_permissions=true\nforce=true\n' > "$LOAD"; run "load config uses parser" 0 bash -c "printf '10\\n$LOAD\\n\\n6\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu"
+contains "loaded config target" 'Target user:[[:space:]]+alice' "$TMP/out"
+BAD="$TMP/bad.conf"; echo 'bad_key=x' > "$BAD"; run "bad load restores" 0 bash -c "printf '10\\n$BAD\\n\\n6\\n\\n0\\n' | INIT_NO_CLEAR=1 '$ROOT/init' menu --target-user alice"
+contains "load restored" 'previous menu state restored' "$TMP/out"
+run "ascii menu has no unicode dash" 0 bash -c "printf '0\\n' | INIT_ASCII_ONLY=1 INIT_NO_CLEAR=1 '$ROOT/init' menu"
+if LC_ALL=C grep -q $'—' "$TMP/out"; then echo 'not ok - unicode dash emitted'; fail=$((fail+1)); else echo 'ok - ascii has no unicode dash'; pass=$((pass+1)); fi
+run "NO_COLOR menu has no ansi" 0 bash -c "printf '0\\n' | NO_COLOR=1 INIT_NO_CLEAR=1 '$ROOT/init' menu"
+if grep -q $'\\033' "$TMP/out"; then echo 'not ok - ansi emitted'; fail=$((fail+1)); else echo 'ok - no ansi emitted'; pass=$((pass+1)); fi
+
 echo "Passed: $pass Failed: $fail"; [ "$fail" -eq 0 ]
