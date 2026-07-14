@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-
-security_module_check() { all_debs_installed "${SECURITY_PACKAGES[@]}" && return 0 || return 1; }
-security_module_plan() { if security_module_check; then log_success "Security packages already installed"; else log_info "Install security packages: ${SECURITY_PACKAGES[*]}"; fi; }
-security_module_apply() {
-  ensure_apt
-  if ! all_debs_installed "${SECURITY_PACKAGES[@]}"; then run_root apt update; run_apt_install "${SECURITY_PACKAGES[@]}"; fi
-  if need_cmd systemctl; then if ! run_root systemctl enable --now fail2ban; then log_warn "fail2ban service enable/start failed; inspect systemctl status fail2ban"; fi; fi
-}
+security_state() { SEC_NEEDS=(); local p; for p in "${SECURITY_PACKAGES[@]}"; do is_deb_installed "$p" || SEC_NEEDS+=("package $p missing"); done; if need_cmd systemctl; then systemctl is-enabled --quiet fail2ban || SEC_NEEDS+=("fail2ban disabled"); systemctl is-active --quiet fail2ban || SEC_NEEDS+=("fail2ban inactive"); else SEC_NEEDS+=("systemctl unavailable"); fi; }
+security_module_check() { security_state; [ "${#SEC_NEEDS[@]}" -eq 0 ] && { echo "security configured"; return 0; }; printf '%s ' "${SEC_NEEDS[@]}"; echo; return 1; }
+security_module_plan() { security_state; local x; for x in "${SEC_NEEDS[@]}"; do case "$x" in package*) plan_add "install ${x#package }";; *disabled) plan_add "enable fail2ban";; *inactive) plan_add "start fail2ban";; systemctl*) plan_warn "$x";; esac; done; [ "${#SEC_NEEDS[@]}" -eq 0 ] && plan_ok "security configured"; return 0; }
+security_module_apply() { ensure_apt; security_state; local missing=() x; for x in "${SEC_NEEDS[@]}"; do [[ "$x" == package* ]] && missing+=("${x#package }"); done; if [ "${#missing[@]}" -gt 0 ]; then run_root apt update; run_apt_install "${missing[@]}"; fi; if ! need_cmd systemctl; then echo "systemctl unavailable; service step skipped"; return 3; fi; run_root systemctl enable fail2ban || return 2; run_root systemctl start fail2ban || return 2; }

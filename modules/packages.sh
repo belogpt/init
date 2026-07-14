@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
-
-packages_module_check() {
-  ensure_apt || return 2
-  all_debs_installed "${BASE_PACKAGES[@]}" && return 0 || return 1
-}
-
-packages_module_plan() {
-  ensure_apt
-  if all_debs_installed "${BASE_PACKAGES[@]}"; then log_success "Base packages already installed"; else log_info "Install base packages: ${BASE_PACKAGES[*]}"; fi
-  if [ "${UPGRADE}" = "1" ]; then log_info "Run apt upgrade for all packages"; else log_info "apt upgrade disabled by default; pass --upgrade to enable"; fi
-}
-
-packages_module_apply() {
-  ensure_supported_platform; ensure_apt
-  run_root apt update
-  if [ "${UPGRADE}" = "1" ]; then
-    local yes_args=(); [ "${ASSUME_YES}" = "1" ] && yes_args=(-y)
-    run_root apt "${yes_args[@]}" upgrade
-  fi
-  if ! all_debs_installed "${BASE_PACKAGES[@]}"; then run_apt_install "${BASE_PACKAGES[@]}"; else log_success "Base packages already installed"; fi
-  if [ -f /var/run/reboot-required ]; then log_warn "Reboot is recommended"; else log_success "No reboot-required marker found"; fi
-}
+packages_missing=()
+packages_collect_missing() { packages_missing=(); local p; ensure_apt || return 2; for p in "${BASE_PACKAGES[@]}"; do is_deb_installed "$p" || packages_missing+=("$p"); done; }
+packages_module_check() { packages_collect_missing || return 2; [ "${#packages_missing[@]}" -eq 0 ] && [ "${UPGRADE}" != 1 ] && { echo "all packages installed"; return 0; }; [ "${#packages_missing[@]}" -gt 0 ] && echo "missing: ${packages_missing[*]}"; [ "${UPGRADE}" = 1 ] && echo "upgrade requested"; return 1; }
+packages_module_plan() { packages_collect_missing || return 2; local p; for p in "${BASE_PACKAGES[@]}"; do if is_deb_installed "$p"; then plan_ok "$p installed"; else plan_add "install $p"; fi; done; if [ "$UPGRADE" = 1 ]; then local count="unknown"; if need_cmd apt; then count="$(apt list --upgradable 2>/dev/null | awk 'NR>1{c++} END{print c+0}' || echo unknown)"; fi; plan_add "apt upgrade (available updates: $count)"; fi; return 0; }
+packages_module_apply() { packages_collect_missing || return 2; if [ "${#packages_missing[@]}" -eq 0 ] && [ "$UPGRADE" != 1 ]; then echo "no package changes"; return 0; fi; run_root apt update || return 2; if [ "$UPGRADE" = 1 ]; then local yes_args=(); [ "$ASSUME_YES" = 1 ] && yes_args=(-y); run_root apt "${yes_args[@]}" upgrade || return 2; fi; [ "${#packages_missing[@]}" -eq 0 ] || run_apt_install "${packages_missing[@]}"; }

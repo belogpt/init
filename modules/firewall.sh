@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-
-firewall_module_check() { need_cmd ufw || return 1; ufw status >/dev/null 2>&1 || return 1; return 0; }
-firewall_module_plan() { if need_cmd ufw; then log_success "UFW installed"; else log_info "Install UFW"; fi; log_info "Allow SSH plus requested ports: http=${ALLOW_HTTP} https=${ALLOW_HTTPS} custom=${ALLOW_PORTS[*]:-none}"; }
-firewall_module_apply() {
-  ensure_apt
-  if ! need_cmd ufw; then run_root apt update; run_apt_install ufw; fi
-  if ! ufw status 2>/dev/null | grep -q 'OpenSSH\|22/tcp'; then if ! run_root ufw allow OpenSSH; then run_root ufw allow ssh; fi; fi
-  if [ "${ALLOW_HTTP}" = "1" ]; then run_root ufw allow 80/tcp; fi
-  if [ "${ALLOW_HTTPS}" = "1" ]; then run_root ufw allow 443/tcp; fi
-  local port; for port in "${ALLOW_PORTS[@]}"; do run_root ufw allow "${port}"; done
-  run_root ufw --force enable
-}
+ufw_status() { need_cmd ufw || return 2; run_root ufw status numbered 2>/dev/null || return 2; }
+fw_has_rule() { printf '%s\n' "$FW_STATUS" | grep -Eiq "(^|[^0-9])$1([[:space:]]|$)"; }
+firewall_state() { FW_NEEDS=(); FW_STATUS=""; need_cmd ufw || FW_NEEDS+=("ufw missing"); if need_cmd ufw; then FW_STATUS="$(ufw_status || true)"; printf '%s' "$FW_STATUS" | grep -qi 'Status: active' || FW_NEEDS+=("ufw inactive"); fw_has_rule '22/tcp|OpenSSH|SSH' || FW_NEEDS+=("SSH rule missing"); [ "$ALLOW_HTTP" = 1 ] && fw_has_rule '80/tcp' || { [ "$ALLOW_HTTP" = 1 ] && FW_NEEDS+=("80/tcp missing"); }; [ "$ALLOW_HTTPS" = 1 ] && fw_has_rule '443/tcp' || { [ "$ALLOW_HTTPS" = 1 ] && FW_NEEDS+=("443/tcp missing"); }; local p; for p in "${ALLOW_PORTS[@]}"; do fw_has_rule "$p" || FW_NEEDS+=("$p missing"); done; fi; }
+firewall_module_check() { firewall_state; [ "${#FW_NEEDS[@]}" -eq 0 ] && { echo "firewall configured"; return 0; }; printf '%s ' "${FW_NEEDS[@]}"; echo; return 1; }
+firewall_module_plan() { firewall_state; local x; for x in "${FW_NEEDS[@]}"; do plan_add "$x"; done; [ "${#FW_NEEDS[@]}" -eq 0 ] && plan_ok "firewall configured"; return 0; }
+firewall_allow_once() { local rule="$1"; firewall_state; fw_has_rule "$rule" || run_root ufw allow "$rule"; }
+firewall_module_apply() { ensure_apt; need_cmd ufw || { run_root apt update; run_apt_install ufw; }; firewall_state; fw_has_rule '22/tcp|OpenSSH|SSH' || { run_root ufw allow OpenSSH || run_root ufw allow ssh || return 2; }; firewall_state; fw_has_rule '22/tcp|OpenSSH|SSH' || { echo "refusing to enable UFW without confirmed SSH rule"; return 2; }; [ "$ALLOW_HTTP" = 1 ] && firewall_allow_once 80/tcp; [ "$ALLOW_HTTPS" = 1 ] && firewall_allow_once 443/tcp; local p; for p in "${ALLOW_PORTS[@]}"; do firewall_allow_once "$p"; done; firewall_state; printf '%s' "$FW_STATUS" | grep -qi 'Status: active' || run_root ufw --force enable; }
