@@ -1,25 +1,8 @@
 #!/usr/bin/env bash
-
-docker_module_check() { need_cmd docker && docker compose version >/dev/null 2>&1 && return 0 || return 1; }
-docker_module_plan() { if docker_module_check; then log_success "Docker and Compose plugin already detected"; else log_info "Install/configure Docker from official repository"; fi; }
-_docker_repo_url() { printf 'https://download.docker.com/linux/%s\n' "${OS_ID}"; }
-docker_module_apply() {
-  ensure_supported_platform; ensure_apt
-  if docker_module_check; then log_success "Docker already installed: $(docker --version | head -n1)"; return 0; fi
-  local repo_url arch; repo_url="$(_docker_repo_url)"; arch="$(dpkg --print-architecture)"
-  run_root apt update; run_apt_install ca-certificates curl gnupg lsb-release
-  run_root install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL "${repo_url}/gpg" | run_root gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  run_root chmod a+r /etc/apt/keyrings/docker.gpg
-  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] %s %s stable\n' "${arch}" "${repo_url}" "${OS_CODENAME}" | run_root tee /etc/apt/sources.list.d/docker.list >/dev/null
-  run_root apt update; run_apt_install "${DOCKER_PACKAGES[@]}"
-  if need_cmd systemctl; then
-    run_root systemctl enable docker
-    if ! run_root systemctl start docker; then log_warn "Docker service start failed; inspect systemctl status docker"; fi
-  fi
-  local target_user
-  if target_user="$(get_target_user 2>/dev/null)" && [ -n "${target_user}" ]; then
-    getent group docker >/dev/null 2>&1 || run_root groupadd docker
-    if id -nG "${target_user}" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then log_success "User ${target_user} is already in docker group"; else run_root usermod -aG docker "${target_user}"; log_warn "Re-login may be required for docker group changes to apply"; fi
-  fi
-}
+_docker_repo_url() { printf 'https://download.docker.com/linux/%s\n' "$OS_ID"; }
+docker_supported_repo() { case "$OS_ID:$OS_CODENAME" in ubuntu:noble|ubuntu:jammy|ubuntu:focal|debian:bookworm|debian:bullseye) return 0;; *) return 1;; esac; }
+docker_state() { load_os_release; DOCKER_NEEDS=(); DOCKER_WARN=(); need_cmd docker || DOCKER_NEEDS+=("Docker CLI missing"); docker compose version >/dev/null 2>&1 || DOCKER_NEEDS+=("Compose plugin missing"); local p; for p in "${DOCKER_PACKAGES[@]}"; do is_deb_installed "$p" || DOCKER_NEEDS+=("package $p missing"); done; [ -r /etc/apt/keyrings/docker.gpg ] || DOCKER_NEEDS+=("Docker keyring missing/unreadable"); [ -s /etc/apt/sources.list.d/docker.list ] || DOCKER_NEEDS+=("Docker repository missing"); if need_cmd systemctl; then systemctl is-active --quiet docker.service || DOCKER_WARN+=("docker.service inactive"); systemctl is-enabled --quiet docker.service || DOCKER_NEEDS+=("docker.service disabled"); else DOCKER_WARN+=("systemctl unavailable"); fi; local u; if u="$(get_target_user 2>/dev/null)" && [ -n "$u" ]; then id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -qx docker || DOCKER_NEEDS+=("user $u not in docker group"); fi; }
+docker_module_check() { docker_state; [ "${#DOCKER_NEEDS[@]}${#DOCKER_WARN[@]}" = 00 ] && { echo "Docker desired state present"; return 0; }; printf '%s ' "${DOCKER_NEEDS[@]}" "${DOCKER_WARN[@]}"; echo; return 1; }
+docker_module_plan() { docker_state; local x; for x in "${DOCKER_NEEDS[@]}"; do plan_add "$x"; done; for x in "${DOCKER_WARN[@]}"; do plan_warn "$x"; done; [ "${#DOCKER_NEEDS[@]}${#DOCKER_WARN[@]}" = 00 ] && plan_ok "Docker configured"; return 0; }
+docker_install_keyring() { local repo_url tmp_raw tmp_gpg fp; ensure_supported_platform; docker_supported_repo || { echo "unsupported Docker repository target: $OS_ID $OS_CODENAME"; return 2; }; repo_url="$(_docker_repo_url)"; tmp_raw="$(mktemp)"; tmp_gpg="$(mktemp)"; trap 'rm -f "$tmp_raw" "$tmp_gpg"' RETURN; curl -fsSL "$repo_url/gpg" -o "$tmp_raw" || { echo "curl failed for Docker GPG key"; return 2; }; [ -s "$tmp_raw" ] || { echo "Docker GPG key download is empty"; return 2; }; if need_cmd gpg; then fp="$(gpg --show-keys --with-colons "$tmp_raw" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"; [ "$fp" = "$DOCKER_GPG_FINGERPRINT" ] || { echo "Docker GPG fingerprint mismatch"; return 2; }; fi; gpg --dearmor -o "$tmp_gpg" "$tmp_raw" || { echo "gpg --dearmor failed"; return 2; }; [ -s "$tmp_gpg" ] || { echo "dearmored keyring empty"; return 2; }; run_root install -m 0644 "$tmp_gpg" /etc/apt/keyrings/docker.gpg; }
+docker_module_apply() { ensure_supported_platform; ensure_apt; docker_state; [ "${#DOCKER_NEEDS[@]}${#DOCKER_WARN[@]}" = 0 ] && { echo "Docker already configured"; return 0; }; local arch repo_url u; run_root apt update; run_apt_install ca-certificates curl gnupg lsb-release; run_root install -m 0755 -d /etc/apt/keyrings; [ -r /etc/apt/keyrings/docker.gpg ] || docker_install_keyring || return 2; arch="$(dpkg --print-architecture)"; repo_url="$(_docker_repo_url)"; printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] %s %s stable\n' "$arch" "$repo_url" "$OS_CODENAME" | run_root tee /etc/apt/sources.list.d/docker.list >/dev/null; run_root apt update; run_apt_install "${DOCKER_PACKAGES[@]}"; if need_cmd systemctl; then run_root systemctl enable docker.service || return 2; run_root systemctl start docker.service || return 2; fi; if u="$(get_target_user 2>/dev/null)" && [ -n "$u" ]; then getent group docker >/dev/null 2>&1 || run_root groupadd docker; id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -qx docker || run_root usermod -aG docker "$u"; fi; }

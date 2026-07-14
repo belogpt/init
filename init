@@ -1,153 +1,79 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 APP_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config/default.conf
 . "${APP_DIR}/config/default.conf"
 # shellcheck source=lib/logging.sh
-. "${APP_DIR}/lib/logging.sh"
-logging_init
+. "${APP_DIR}/lib/logging.sh"; logging_init
 # shellcheck source=lib/common.sh
 . "${APP_DIR}/lib/common.sh"
 # shellcheck source=lib/platform.sh
 . "${APP_DIR}/lib/platform.sh"
 # shellcheck source=lib/state.sh
 . "${APP_DIR}/lib/state.sh"
-
 trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
 
-usage() {
-  cat <<'USAGE'
+usage() { cat <<'USAGE'
 Usage: init [GLOBAL FLAGS] COMMAND [MODULE...] [OPTIONS]
-
-Commands:
-  help       Show help.             modules    List module registry.
-  version    Show tool version.     check      Inspect selected modules.
-  plan       Show selected plan.     apply      Apply selected modules.
-
-Global flags:
-  --target-user USER  User for git/ssh user-context modules.
-  --no-color          Disable colored output.
-  --debug             Enable debug logs.
-  --yes, -y           Assume yes for package manager prompts.
-  --upgrade           Run apt upgrade in packages module.
-  --skip-upgrade      Deprecated no-op; upgrade is skipped by default.
-
-Options:
-  --git-name NAME       Configure target user's global git user.name.
-  --git-email EMAIL     Configure target user's global git user.email.
-  --ssh-key-path PATH   SSH private key path (default: ~/.ssh/id_ed25519).
-  --ssh-key-comment TXT SSH key comment.
-  --allow-http          Allow TCP port 80 in UFW.
-  --allow-https         Allow TCP port 443 in UFW.
-  --allow-port PORT/PROTO (1-65535 tcp|udp). Repeatable.
+Commands: help version modules config check plan apply
+Global: --config FILE --format text|json --target-user USER --no-color --debug --yes|-y --upgrade --force
+Options: --git-name NAME --git-email EMAIL --ssh-key-path PATH --ssh-key-comment TXT --repair-permissions --allow-http --allow-https --allow-port PORT/PROTO
 USAGE
 }
-
-is_command() { case "$1" in help|version|modules|check|plan|apply) return 0;; *) return 1;; esac; }
+is_command() { case "$1" in help|version|modules|config|check|plan|apply) return 0;; *) return 1;; esac; }
 module_exists() { local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do [ "$m" = "$1" ] && return 0; done; return 1; }
-
-validate_port_rule() {
-  [[ "$1" =~ ^([0-9]+)/(tcp|udp)$ ]] || { log_error "--allow-port must use PORT/PROTO, for example 8080/tcp or 53/udp"; return 2; }
-  local port="${BASH_REMATCH[1]}"
-  [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] || { log_error "--allow-port port must be in range 1-65535"; return 2; }
-}
-
 expect_value() { [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || { log_error "$1 requires a value"; return 2; }; }
-
-parse_args() {
-  COMMAND=""; REQUESTED_MODULES=()
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --no-color) INIT_NO_COLOR=1; logging_init ;;
-      --debug) INIT_DEBUG=1 ;;
-      --yes|-y) ASSUME_YES=1 ;;
-      --upgrade) UPGRADE=1 ;;
-      --skip-upgrade) log_warn "--skip-upgrade is deprecated and is now a no-op; apt upgrade is skipped unless --upgrade is set" ;;
-      --target-user) expect_value "$1" "${2:-}"; TARGET_USER="$2"; shift ;;
-      --help) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and help"; return 2; }; COMMAND=help ;;
-      --check) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and check"; return 2; }; COMMAND=check ;;
-      --all) [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and apply"; return 2; }; COMMAND=apply ;;
-      --git-name) expect_value "$1" "${2:-}"; GIT_NAME="$2"; shift ;;
-      --git-email) expect_value "$1" "${2:-}"; GIT_EMAIL="$2"; shift ;;
-      --ssh-key-path) expect_value "$1" "${2:-}"; SSH_KEY_PATH="$2"; shift ;;
-      --ssh-key-comment) expect_value "$1" "${2:-}"; SSH_KEY_COMMENT="$2"; shift ;;
-      --allow-http) ALLOW_HTTP=1 ;;
-      --allow-https) ALLOW_HTTPS=1 ;;
-      --allow-port) expect_value "$1" "${2:-}"; validate_port_rule "$2"; ALLOW_PORTS+=("$2"); shift ;;
-      --*) log_error "Unknown command or option: $1"; return 2 ;;
-      *)
-        if is_command "$1"; then
-          [ -z "${COMMAND}" ] || { log_error "Multiple commands specified: ${COMMAND} and $1"; return 2; }
-          COMMAND="$1"
-        else
-          REQUESTED_MODULES+=("$1")
-        fi
-        ;;
+validate_bool() { case "$2" in true|false|1|0) return 0;; *) log_error "$1 must be true or false"; return 2;; esac; }
+bool_to_int() { case "$1" in true|1) printf 1;; false|0) printf 0;; esac; }
+validate_port_rule() { [[ "$1" =~ ^([0-9]+)/(tcp|udp)$ ]] || { log_error "--allow-port must use PORT/PROTO"; return 2; }; local p="${BASH_REMATCH[1]}"; [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || { log_error "--allow-port port must be 1-65535"; return 2; }; }
+set_modules_from_csv() { REQUESTED_MODULES=(); local IFS=, m; read -ra REQUESTED_MODULES <<< "$1"; for m in "${REQUESTED_MODULES[@]}"; do m="${m//[[:space:]]/}"; module_exists "$m" || { log_error "Unknown module in config: $m"; return 2; }; done; }
+trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+parse_config_file() {
+  local file="$1" line key value n=0
+  [ -r "$file" ] || { log_error "Config is not readable: $file"; return 2; }
+  LC_ALL=C tr -d '\000' < "$file" | cmp -s - "$file" || { log_error "Config contains NUL byte"; return 2; }
+  while IFS= read -r line || [ -n "$line" ]; do n=$((n+1)); line="$(trim "$line")"; [ -z "$line" ] && continue; [[ "$line" == \#* ]] && continue
+    [[ "$line" == *'='* ]] || { log_error "Invalid config line $n"; return 2; }
+    key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")"; [ -n "$key" ] || { log_error "Invalid empty key at line $n"; return 2; }
+    case "$key" in
+      target_user) TARGET_USER="$value";; git_name) GIT_NAME="$value";; git_email) GIT_EMAIL="$value";; ssh_key_path) SSH_KEY_PATH="$value";; ssh_key_comment) SSH_KEY_COMMENT="$value";;
+      upgrade) validate_bool "$key" "$value"; UPGRADE="$(bool_to_int "$value")";; assume_yes) validate_bool "$key" "$value"; ASSUME_YES="$(bool_to_int "$value")";;
+      allow_http) validate_bool "$key" "$value"; ALLOW_HTTP="$(bool_to_int "$value")";; allow_https) validate_bool "$key" "$value"; ALLOW_HTTPS="$(bool_to_int "$value")";;
+      allow_port) validate_port_rule "$value"; ALLOW_PORTS+=("$value");; modules) set_modules_from_csv "$value";; *) log_error "Unknown config key: $key"; return 2;;
     esac
-    shift
+  done < "$file"
+}
+parse_args() {
+  COMMAND=""; REQUESTED_MODULES=(); local args=("$@") config_file="" cli_ports=() cli_modules=() cli_modules_set=0 i
+  # First pass: global config/format so user config is loaded before CLI overrides.
+  i=0
+  while [ "$i" -lt "${#args[@]}" ]; do
+    case "${args[$i]}" in
+      --config) i=$((i+1)); config_file="${args[$i]:-}";;
+      --format) i=$((i+1)); case "${args[$i]:-}" in text|json) OUTPUT_FORMAT="${args[$i]}"; [ "$OUTPUT_FORMAT" = json ] && INIT_NO_COLOR=1; logging_init;; *) log_error "--format must be text or json"; return 2;; esac;;
+      --no-color) INIT_NO_COLOR=1; logging_init;;
+    esac
+    i=$((i+1))
   done
-  if [ -z "${COMMAND}" ]; then
-    if [ "${#REQUESTED_MODULES[@]}" -gt 0 ]; then log_error "Unknown command or option: ${REQUESTED_MODULES[0]}"; return 2; fi
-    COMMAND="help"
-  fi
+  [ -z "$config_file" ] || parse_config_file "$config_file" || return 2
+  # Second pass: CLI always wins over config.
+  while [ "$#" -gt 0 ]; do case "$1" in
+    --config) expect_value "$1" "${2:-}"; shift;; --format) expect_value "$1" "${2:-}"; shift;;
+    --no-color) INIT_NO_COLOR=1; logging_init;; --debug) INIT_DEBUG=1;; --yes|-y) ASSUME_YES=1;; --upgrade) UPGRADE=1;; --force) FORCE_APPLY=1;; --repair-permissions) REPAIR_PERMISSIONS=1;; --target-user) expect_value "$1" "${2:-}"; TARGET_USER="$2"; shift;;
+    --git-name) expect_value "$1" "${2:-}"; GIT_NAME="$2"; shift;; --git-email) expect_value "$1" "${2:-}"; GIT_EMAIL="$2"; shift;; --ssh-key-path) expect_value "$1" "${2:-}"; SSH_KEY_PATH="$2"; shift;; --ssh-key-comment) expect_value "$1" "${2:-}"; SSH_KEY_COMMENT="$2"; shift;;
+    --allow-http) ALLOW_HTTP=1;; --allow-https) ALLOW_HTTPS=1;; --allow-port) expect_value "$1" "${2:-}"; validate_port_rule "$2"; cli_ports+=("$2"); shift;; --skip-upgrade) log_warn "--skip-upgrade is a no-op";;
+    --help) COMMAND=help;; --check) COMMAND=check;; --all) COMMAND=apply;; --*) log_error "Unknown command or option: $1"; return 2;;
+    *) if is_command "$1"; then [ -z "$COMMAND" ] || { log_error "Multiple commands specified"; return 2; }; COMMAND="$1"; else if [ -z "$COMMAND" ]; then log_error "Unknown command or option: $1"; return 2; fi; cli_modules+=("$1"); cli_modules_set=1; fi;; esac; shift; done
+  if [ "$cli_modules_set" = 1 ]; then REQUESTED_MODULES=("${cli_modules[@]}"); fi
+  if [ "${#cli_ports[@]}" -gt 0 ]; then ALLOW_PORTS+=("${cli_ports[@]}"); fi
+  [ -n "$COMMAND" ] || COMMAND=help
 }
-
-load_modules() { local module; for module in "${INIT_REGISTERED_MODULES[@]}"; do . "${APP_DIR}/modules/${module}.sh"; done; }
-
-resolve_modules() {
-  RESOLVED_MODULES=(); local seen=" " input module dep
-  local inputs=("${REQUESTED_MODULES[@]}")
-  if [ "${#inputs[@]}" -eq 0 ]; then for module in "${INIT_REGISTERED_MODULES[@]}"; do [ "${INIT_MODULE_DEFAULTS[$module]}" = 1 ] && inputs+=("$module"); done; fi
-  _add_module() {
-    local m="$1" d
-    module_exists "$m" || { log_error "Unknown module: $m"; return 2; }
-    [[ "$seen" == *" $m "* ]] && return 0
-    seen+="$m "
-    for d in ${INIT_MODULE_DEPS[$m]}; do _add_module "$d"; done
-    RESOLVED_MODULES+=("$m")
-  }
-  for input in "${inputs[@]}"; do _add_module "$input"; done
-}
-
-cmd_modules() { printf '%-12s %-8s %-18s %s\n' Module Default Dependencies Description; local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do printf '%-12s %-8s %-18s %s\n' "$m" "${INIT_MODULE_DEFAULTS[$m]}" "${INIT_MODULE_DEPS[$m]:--}" "${INIT_MODULE_DESCRIPTIONS[$m]}"; done; }
-
-run_modules() {
-  local action="$1" module fn rc overall=0 statuses=()
-  resolve_modules
-  for module in "${RESOLVED_MODULES[@]}"; do
-    fn="${module}_module_${action}"
-    declare -F "${fn}" >/dev/null 2>&1 || { log_error "Module ${module} does not implement ${action}"; return 2; }
-    trap - ERR; set +e; "${fn}"; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
-    if [ "${action}" = check ]; then
-      statuses+=("${module}:$(module_status_text "$rc")")
-      if [ "$rc" -ge 2 ]; then overall=2; elif [ "$rc" -eq 1 ] && [ "$overall" -eq 0 ]; then overall=1; fi
-    else
-      statuses+=("${module}:done")
-      [ "$rc" -eq 0 ] || overall="$rc"
-    fi
-  done
-  printf '\n%-12s %s\n' Module Status
-  for module in "${statuses[@]}"; do printf '%-12s %s\n' "${module%%:*}" "${module#*:}"; done
-  return "$overall"
-}
-
-main() {
-  set +e; parse_args "$@"; local rc=$?; set -e; [ "$rc" -eq 0 ] || return "$rc"
-  load_modules
-  set +e
-  case "${COMMAND}" in
-    help) usage ;;
-    version) printf '%s\n' "${INIT_VERSION}" ;;
-    modules) cmd_modules ;;
-    check) run_modules check ;;
-    plan) run_modules plan ;;
-    apply) run_modules apply ;;
-    *) log_error "Unknown command or option: ${COMMAND}"; rc=2 ;;
-  esac
-  rc=$?
-  set -e
-  return "$rc"
-}
-
+load_modules() { local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do . "${APP_DIR}/modules/${m}.sh"; done; }
+resolve_modules() { RESOLVED_MODULES=(); local seen=" " inputs=("${REQUESTED_MODULES[@]}") m; [ "${#inputs[@]}" -eq 0 ] && for m in "${INIT_REGISTERED_MODULES[@]}"; do [ "${INIT_MODULE_DEFAULTS[$m]}" = 1 ] && inputs+=("$m"); done; _add_module(){ local x="$1" d; module_exists "$x" || { log_error "Unknown module: $x"; return 2; }; [[ "$seen" == *" $x "* ]] && return 0; seen+="$x "; for d in ${INIT_MODULE_DEPS[$x]}; do _add_module "$d"; done; RESOLVED_MODULES+=("$x"); }; for m in "${inputs[@]}"; do _add_module "$m"; done; }
+cmd_modules() { if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"modules","modules":['; local first=1 m; for m in "${INIT_REGISTERED_MODULES[@]}"; do [ $first -eq 1 ] || printf ','; first=0; printf '{"name":"%s","default":%s,"dependencies":' "$m" "${INIT_MODULE_DEFAULTS[$m]}"; print_json_string_array ${INIT_MODULE_DEPS[$m]}; printf ',"description":"%s"}' "$(json_escape "${INIT_MODULE_DESCRIPTIONS[$m]}")"; done; printf ']}\n'; else printf 'Module\tDefault\tDependencies\tDescription\n'; local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do printf '%s\t%s\t%s\t%s\n' "$m" "${INIT_MODULE_DEFAULTS[$m]}" "${INIT_MODULE_DEPS[$m]:--}" "${INIT_MODULE_DESCRIPTIONS[$m]}"; done; fi; }
+cmd_config() { resolve_modules; if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"config","target_user":"%s","modules":' "$(json_escape "$TARGET_USER")"; print_json_string_array "${RESOLVED_MODULES[@]}"; printf ',"upgrade":%s,"assume_yes":%s,"git_name":"%s","git_email":"%s","ssh_key_path":"%s","allow_http":%s,"allow_https":%s,"allow_ports":' "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "$([ "$ASSUME_YES" = 1 ] && echo true || echo false)" "$(json_escape "$GIT_NAME")" "$(json_escape "$GIT_EMAIL")" "$(json_escape "$SSH_KEY_PATH")" "$([ "$ALLOW_HTTP" = 1 ] && echo true || echo false)" "$([ "$ALLOW_HTTPS" = 1 ] && echo true || echo false)"; print_json_string_array "${ALLOW_PORTS[@]}"; printf '}\n'; else printf 'Target user:\t%s\nModules:\t%s\nUpgrade:\t%s\nGit name:\t%s\nGit email:\t%s\nSSH key path:\t%s\nAllowed ports:\t%s\n' "${TARGET_USER:-auto}" "${RESOLVED_MODULES[*]}" "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "${GIT_NAME:-}" "${GIT_EMAIL:-}" "$SSH_KEY_PATH" "${ALLOW_PORTS[*]:-}"; fi; }
+run_check_like() { local action="$1" module fn rc overall=0 dep status details baddep; RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=(); resolve_modules; for module in "${RESOLVED_MODULES[@]}"; do baddep=""; for dep in ${INIT_MODULE_DEPS[$module]}; do status=""; for i in "${!RESULT_MODULES[@]}"; do [ "${RESULT_MODULES[$i]}" = "$dep" ] && status="${RESULT_STATUSES[$i]}"; done; case "$status" in failed|blocked|'check failed') baddep="dependency $dep $status";; esac; done; if [ -n "$baddep" ]; then record_result "$module" blocked "$baddep"; overall=2; continue; fi; fn="${module}_module_${action}"; trap - ERR; set +e; "$fn" >/tmp/init_module_out 2>&1; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; details="$(tr '\n' ';' </tmp/init_module_out | sed 's/;*$//')"; if [ "$action" = check ]; then status="$(module_status_text "$rc")"; else [ "$rc" -eq 0 ] && status=planned || status=failed; fi; record_result "$module" "$status" "$details"; if [ "$action" = check ]; then [ "$rc" -eq 1 ] && [ "$overall" -eq 0 ] && overall=1; [ "$rc" -ge 2 ] && overall=2; else [ "$rc" -ne 0 ] && overall=2; fi; done; print_results "$action"; return "$overall"; }
+run_apply() { local module pre rc post status details overall=0 dep baddep fn; RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=(); resolve_modules; for module in "${RESOLVED_MODULES[@]}"; do baddep=""; for dep in ${INIT_MODULE_DEPS[$module]}; do for i in "${!RESULT_MODULES[@]}"; do [ "${RESULT_MODULES[$i]}" = "$dep" ] || continue; case "${RESULT_STATUSES[$i]}" in failed|blocked) baddep="dependency $dep ${RESULT_STATUSES[$i]}";; esac; done; done; if [ -n "$baddep" ]; then record_result "$module" blocked "$baddep"; overall=2; continue; fi; trap - ERR; set +e; "${module}_module_check" >/tmp/init_pre 2>&1; pre=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; if [ "$pre" -eq 0 ] && [ "$FORCE_APPLY" != 1 ]; then record_result "$module" unchanged "already configured"; continue; fi; if [ "$pre" -ge 2 ]; then record_result "$module" blocked "pre-check $(module_status_text "$pre")"; overall=2; continue; fi; fn="${module}_module_apply"; trap - ERR; set +e; "$fn" >/tmp/init_apply 2>&1; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; details="$(tr '\n' ';' </tmp/init_apply | sed 's/;*$//')"; if [ "$rc" -eq 3 ]; then record_result "$module" skipped "${details:-skipped}"; continue; fi; if [ "$rc" -ne 0 ]; then record_result "$module" failed "${details:-apply failed}"; overall=2; continue; fi; trap - ERR; set +e; "${module}_module_check" >/tmp/init_post 2>&1; post=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; if [ "$post" -eq 0 ]; then record_result "$module" applied "${details:-applied}"; else record_result "$module" failed "post-check failed: $(tr '\n' ';' </tmp/init_post | sed 's/;*$//')"; overall=2; fi; done; print_results apply; return "$overall"; }
+print_results() { local cmd="$1" i st overall="configured"; for st in "${RESULT_STATUSES[@]}"; do case "$st" in 'needs changes'|needs_changes) [ "$overall" = configured ] && overall=needs_changes;; failed|blocked|'check failed') overall=failed;; esac; done; if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"%s","status":"%s","modules":[' "$cmd" "$(status_slug "$overall")"; for i in "${!RESULT_MODULES[@]}"; do [ "$i" -eq 0 ] || printf ','; printf '{"name":"%s","status":"%s","details":' "${RESULT_MODULES[$i]}" "$(status_slug "${RESULT_STATUSES[$i]}")"; print_json_string_array "${RESULT_DETAILS[$i]}"; printf '}'; done; printf ']}\n'; else printf 'Module\tStatus\tDetails\n'; for i in "${!RESULT_MODULES[@]}"; do printf '%s\t%s\t%s\n' "${RESULT_MODULES[$i]}" "${RESULT_STATUSES[$i]}" "${RESULT_DETAILS[$i]}"; done; fi; }
+main() { set +e; parse_args "$@"; local rc=$?; set -e; [ "$rc" -eq 0 ] || return "$rc"; load_modules; set +e; case "$COMMAND" in help) usage;; version) printf '%s\n' "$INIT_VERSION";; modules) cmd_modules;; config) cmd_config;; check) run_check_like check;; plan) run_check_like plan;; apply) run_apply;; esac; rc=$?; set -e; return "$rc"; }
 main "$@"
