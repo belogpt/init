@@ -2,6 +2,77 @@
 
 `init` is a modular Bash tool for preparing Ubuntu/Debian VPS hosts. It can be used as a normal CLI (`check`, `plan`, `apply`, `modules`, `config`) or through an interactive menu.
 
+## Установка на сервер
+
+Инструмент рассчитан на Ubuntu/Debian. На сервере должны быть установлены `bash`,
+`git` и `sudo`. Скопируйте URL этого репозитория на странице **Code**, подключитесь
+к серверу по SSH и выполните:
+
+```bash
+sudo apt update
+sudo apt install -y git
+git clone <URL-РЕПОЗИТОРИЯ> init
+cd init
+chmod +x init bootstrap.sh
+```
+
+Сначала безопасно проверьте сервер и посмотрите план изменений — эти команды
+ничего не устанавливают:
+
+```bash
+./init check
+./init plan
+```
+
+Затем запустите интерактивное меню на русском языке:
+
+```bash
+sudo ./init menu --lang ru
+```
+
+Либо примените все модули без меню. Укажите обычного пользователя сервера,
+для которого нужно настроить Git, SSH-ключ и доступ к Docker:
+
+```bash
+sudo ./init apply --target-user "$USER"
+```
+
+> Если вы вошли на сервер как `root`, замените `$USER` на имя обычного
+> пользователя, например `deploy`. Перед применением проверьте план той же
+> командой, заменив `apply` на `plan`.
+
+Для полностью автоматического запуска без вопросов используйте `--yes`:
+
+```bash
+sudo ./init apply --target-user deploy --yes
+```
+
+Чтобы обновить уже скачанный проект и снова применить конфигурацию:
+
+```bash
+cd init
+git pull --ff-only
+sudo ./init plan --target-user deploy
+sudo ./init apply --target-user deploy
+```
+
+Для воспроизводимого развёртывания параметры можно сохранить в конфигурационном
+файле (пример приведён в разделе [Configuration examples](#configuration-examples)):
+
+```bash
+cat > server.conf <<'EOF'
+language=ru
+target_user=deploy
+assume_yes=1
+modules=system,packages,docker,git,ssh_key,firewall,security
+EOF
+./init plan --config server.conf
+sudo ./init apply --config server.conf
+```
+
+Не используйте `config/default.conf` как пользовательский конфиг: это внутренний
+Bash-файл с настройками приложения.
+
 ## Quick start
 
 ```bash
