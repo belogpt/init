@@ -10,7 +10,14 @@ need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 run_root() { if [ "${EUID:-$(id -u)}" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
 
-run_apt_install() { local yes_args=(); [ "${ASSUME_YES:-0}" = "1" ] && yes_args=(-y); run_root apt "${yes_args[@]}" install "$@"; }
+apt_assume_yes() {
+  [ "${ASSUME_YES:-0}" = "1" ] && return 0
+  local fn
+  for fn in "${FUNCNAME[@]:1}"; do [ "$fn" = menu_run_apply ] && return 0; done
+  return 1
+}
+
+run_apt_install() { local yes_args=(); apt_assume_yes && yes_args=(-y); run_root apt "${yes_args[@]}" install "$@"; }
 
 is_deb_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
