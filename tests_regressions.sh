@@ -25,8 +25,9 @@ not_ok() { echo "not ok - $1"; fail=$((fail+1)); }
 # shellcheck source=modules/git.sh
 . "$ROOT/modules/git.sh"
 
-# Docker keyring regression: gpg output must not exist before --dearmor runs,
-# and the conversion must be explicitly non-interactive.
+# Docker keyring regressions: gpg output must not exist before --dearmor runs,
+# conversion must be non-interactive, and the RETURN cleanup trap must not leak
+# into the caller where set -u would later abort on out-of-scope local variables.
 ensure_supported_platform() { OS_ID=ubuntu; OS_CODENAME=noble; return 0; }
 curl() {
   local out=""
@@ -66,6 +67,13 @@ if [ "$docker_rc" -eq 0 ] && [ -s "$TMP/installed-docker.gpg" ]; then
 else
   not_ok "docker keyring dearmor is non-interactive and uses a fresh output path"
   cat "$TMP/docker.out"
+fi
+if [ -z "$(trap -p RETURN)" ]; then
+  ok "docker keyring cleanup RETURN trap does not leak into callers"
+else
+  not_ok "docker keyring cleanup RETURN trap does not leak into callers"
+  trap -p RETURN
+  trap - RETURN
 fi
 
 # Menu confirmation regression: apt is non-interactive only inside the confirmed
