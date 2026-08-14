@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 ufw_status() { need_cmd ufw || return 2; run_root ufw status numbered 2>/dev/null || return 2; }
-fw_has_rule() { printf '%s\n' "$FW_STATUS" | grep -Eiq "(^|[^0-9])$1([[:space:]]|$)"; }
-firewall_state() { FW_NEEDS=(); FW_STATUS=""; need_cmd ufw || FW_NEEDS+=("ufw missing"); if need_cmd ufw; then FW_STATUS="$(ufw_status || true)"; printf '%s' "$FW_STATUS" | grep -qi 'Status: active' || FW_NEEDS+=("ufw inactive"); fw_has_rule '22/tcp|OpenSSH|SSH' || FW_NEEDS+=("SSH rule missing"); [ "$ALLOW_HTTP" = 1 ] && fw_has_rule '80/tcp' || { [ "$ALLOW_HTTP" = 1 ] && FW_NEEDS+=("80/tcp missing"); }; [ "$ALLOW_HTTPS" = 1 ] && fw_has_rule '443/tcp' || { [ "$ALLOW_HTTPS" = 1 ] && FW_NEEDS+=("443/tcp missing"); }; local p; for p in "${ALLOW_PORTS[@]}"; do fw_has_rule "$p" || FW_NEEDS+=("$p missing"); done; fi; }
+ufw_added() { need_cmd ufw || return 2; run_root ufw show added 2>/dev/null || return 2; }
+fw_has_rule() { printf '%s\n%s\n' "$FW_STATUS" "$FW_ADDED" | grep -Eiq "(^|[^0-9])$1([[:space:]'\"]|$)"; }
+firewall_state() { FW_NEEDS=(); FW_STATUS=""; FW_ADDED=""; need_cmd ufw || FW_NEEDS+=("ufw missing"); if need_cmd ufw; then FW_STATUS="$(ufw_status || true)"; FW_ADDED="$(ufw_added || true)"; printf '%s' "$FW_STATUS" | grep -qi 'Status: active' || FW_NEEDS+=("ufw inactive"); fw_has_rule '22/tcp|OpenSSH|SSH' || FW_NEEDS+=("SSH rule missing"); [ "$ALLOW_HTTP" = 1 ] && fw_has_rule '80/tcp' || { [ "$ALLOW_HTTP" = 1 ] && FW_NEEDS+=("80/tcp missing"); }; [ "$ALLOW_HTTPS" = 1 ] && fw_has_rule '443/tcp' || { [ "$ALLOW_HTTPS" = 1 ] && FW_NEEDS+=("443/tcp missing"); }; local p; for p in "${ALLOW_PORTS[@]}"; do fw_has_rule "$p" || FW_NEEDS+=("$p missing"); done; fi; }
 firewall_module_check() { firewall_state; [ "${#FW_NEEDS[@]}" -eq 0 ] && { echo "firewall configured"; return 0; }; printf '%s ' "${FW_NEEDS[@]}"; echo; return 1; }
 firewall_module_plan() { firewall_state; local x; for x in "${FW_NEEDS[@]}"; do plan_add "$x"; done; [ "${#FW_NEEDS[@]}" -eq 0 ] && plan_ok "firewall configured"; return 0; }
 firewall_allow_once() { local rule="$1"; firewall_state; fw_has_rule "$rule" || run_root ufw allow "$rule"; }
