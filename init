@@ -77,20 +77,156 @@ parse_args() {
 load_modules() { local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do . "${APP_DIR}/modules/${m}.sh"; done; }
 resolve_modules() { RESOLVED_MODULES=(); local seen=" " inputs=("${REQUESTED_MODULES[@]}") m; [ "${#inputs[@]}" -eq 0 ] && for m in "${INIT_REGISTERED_MODULES[@]}"; do [ "${INIT_MODULE_DEFAULTS[$m]}" = 1 ] && inputs+=("$m"); done; _add_module(){ local x="$1" d; module_exists "$x" || { log_error "Unknown module: $x"; return 2; }; [[ "$seen" == *" $x "* ]] && return 0; seen+="$x "; for d in ${INIT_MODULE_DEPS[$x]}; do _add_module "$d"; done; RESOLVED_MODULES+=("$x"); }; for m in "${inputs[@]}"; do _add_module "$m"; done; }
 cmd_modules() { if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"modules","modules":['; local first=1 m; for m in "${INIT_REGISTERED_MODULES[@]}"; do [ $first -eq 1 ] || printf ','; first=0; printf '{"name":"%s","default":%s,"dependencies":' "$m" "${INIT_MODULE_DEFAULTS[$m]}"; print_json_string_array ${INIT_MODULE_DEPS[$m]}; printf ',"description":"%s"}' "$(json_escape "${INIT_MODULE_DESCRIPTIONS[$m]}")"; done; printf ']}\n'; else printf 'Module\tDefault\tDependencies\tDescription\n'; local m; for m in "${INIT_REGISTERED_MODULES[@]}"; do printf '%s\t%s\t%s\t%s\n' "$m" "${INIT_MODULE_DEFAULTS[$m]}" "${INIT_MODULE_DEPS[$m]:--}" "${INIT_MODULE_DESCRIPTIONS[$m]}"; done; fi; }
-cmd_config() { resolve_modules; if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"config","language":"%s","target_user":"%s","modules":' "${INIT_LANG_MODE:-auto}" "$(json_escape "$TARGET_USER")"; print_json_string_array "${RESOLVED_MODULES[@]}"; printf ',"upgrade":%s,"assume_yes":%s,"git_name":"%s","git_email":"%s","ssh_key_path":"%s","allow_http":%s,"allow_https":%s,"allow_ports":' "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "$([ "$ASSUME_YES" = 1 ] && echo true || echo false)" "$(json_escape "$GIT_NAME")" "$(json_escape "$GIT_EMAIL")" "$(json_escape "$SSH_KEY_PATH")" "$([ "$ALLOW_HTTP" = 1 ] && echo true || echo false)" "$([ "$ALLOW_HTTPS" = 1 ] && echo true || echo false)"; print_json_string_array "${ALLOW_PORTS[@]}"; printf '}
-'; else printf 'Language:	%s
-Target user:	%s
-Modules:	%s
-Upgrade:	%s
-Git name:	%s
-Git email:	%s
-SSH key path:	%s
-Allowed ports:	%s
-Repair permissions:	%s
-Force apply:	%s
-' "${INIT_LANG_MODE:-auto}" "${TARGET_USER:-auto}" "${RESOLVED_MODULES[*]}" "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "${GIT_NAME:-}" "${GIT_EMAIL:-}" "$SSH_KEY_PATH" "${ALLOW_PORTS[*]:-}" "$([ "$REPAIR_PERMISSIONS" = 1 ] && echo true || echo false)" "$([ "$FORCE_APPLY" = 1 ] && echo true || echo false)"; fi; }
-run_check_like() { local action="$1" module fn rc overall=0 dep status details baddep tmp; RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=(); resolve_modules; for module in "${RESOLVED_MODULES[@]}"; do baddep=""; for dep in ${INIT_MODULE_DEPS[$module]}; do status=""; for i in "${!RESULT_MODULES[@]}"; do [ "${RESULT_MODULES[$i]}" = "$dep" ] && status="${RESULT_STATUSES[$i]}"; done; case "$status" in failed|blocked|'check failed') baddep="dependency $dep $status";; esac; done; if [ -n "$baddep" ]; then record_result "$module" blocked "$baddep"; overall=2; continue; fi; fn="${module}_module_${action}"; trap - ERR; set +e; tmp="$(mktemp "${TMPDIR:-/tmp}/init.module.XXXXXX")"; "$fn" >"$tmp" 2>&1; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; details="$(tr '\n' ';' <"$tmp" | sed 's/;*$//')"; rm -f "$tmp"; if [ "$action" = check ]; then status="$(module_status_text "$rc")"; else [ "$rc" -eq 0 ] && status=planned || status=failed; fi; record_result "$module" "$status" "$details"; if [ "$action" = check ]; then [ "$rc" -eq 1 ] && [ "$overall" -eq 0 ] && overall=1; [ "$rc" -ge 2 ] && overall=2; else [ "$rc" -ne 0 ] && overall=2; fi; done; print_results "$action"; return "$overall"; }
-run_apply() { local module pre rc post status details overall=0 dep baddep fn tmp_pre tmp_apply tmp_post; RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=(); resolve_modules; for module in "${RESOLVED_MODULES[@]}"; do baddep=""; for dep in ${INIT_MODULE_DEPS[$module]}; do for i in "${!RESULT_MODULES[@]}"; do [ "${RESULT_MODULES[$i]}" = "$dep" ] || continue; case "${RESULT_STATUSES[$i]}" in failed|blocked) baddep="dependency $dep ${RESULT_STATUSES[$i]}";; esac; done; done; if [ -n "$baddep" ]; then record_result "$module" blocked "$baddep"; overall=2; continue; fi; trap - ERR; set +e; tmp_pre="$(mktemp "${TMPDIR:-/tmp}/init.pre.XXXXXX")"; "${module}_module_check" >"$tmp_pre" 2>&1; pre=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; if [ "$pre" -eq 0 ] && [ "$FORCE_APPLY" != 1 ]; then record_result "$module" unchanged "already configured"; rm -f "${tmp_pre:-}"; continue; fi; if [ "$pre" -ge 2 ]; then record_result "$module" blocked "pre-check $(module_status_text "$pre")"; overall=2; rm -f "${tmp_pre:-}"; continue; fi; fn="${module}_module_apply"; trap - ERR; set +e; tmp_apply="$(mktemp "${TMPDIR:-/tmp}/init.apply.XXXXXX")"; "$fn" >"$tmp_apply" 2>&1; rc=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; details="$(tr '\n' ';' <"$tmp_apply" | sed 's/;*$//')"; rm -f "$tmp_apply"; if [ "$rc" -eq 3 ]; then record_result "$module" skipped "${details:-skipped}"; rm -f "${tmp_pre:-}"; continue; fi; if [ "$rc" -ne 0 ]; then record_result "$module" failed "${details:-apply failed}"; overall=2; rm -f "${tmp_pre:-}"; continue; fi; trap - ERR; set +e; tmp_post="$(mktemp "${TMPDIR:-/tmp}/init.post.XXXXXX")"; "${module}_module_check" >"$tmp_post" 2>&1; post=$?; set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR; if [ "$post" -eq 0 ]; then record_result "$module" applied "${details:-applied}"; else record_result "$module" failed "post-check failed: $(tr '\n' ';' <"$tmp_post" | sed 's/;*$//')"; overall=2; fi; rm -f "${tmp_pre:-}" "${tmp_post:-}"; done; print_results apply; return "$overall"; }
+cmd_config() { resolve_modules; if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"config","language":"%s","target_user":"%s","modules":' "${INIT_LANG_MODE:-auto}" "$(json_escape "$TARGET_USER")"; print_json_string_array "${RESOLVED_MODULES[@]}"; printf ',"upgrade":%s,"assume_yes":%s,"git_name":"%s","git_email":"%s","ssh_key_path":"%s","allow_http":%s,"allow_https":%s,"allow_ports":' "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "$([ "$ASSUME_YES" = 1 ] && echo true || echo false)" "$(json_escape "$GIT_NAME")" "$(json_escape "$GIT_EMAIL")" "$(json_escape "$SSH_KEY_PATH")" "$([ "$ALLOW_HTTP" = 1 ] && echo true || echo false)" "$([ "$ALLOW_HTTPS" = 1 ] && echo true || echo false)"; print_json_string_array "${ALLOW_PORTS[@]}"; printf '}\n'; else printf 'Language:\t%s\nTarget user:\t%s\nModules:\t%s\nUpgrade:\t%s\nGit name:\t%s\nGit email:\t%s\nSSH key path:\t%s\nAllowed ports:\t%s\nRepair permissions:\t%s\nForce apply:\t%s\n' "${INIT_LANG_MODE:-auto}" "${TARGET_USER:-auto}" "${RESOLVED_MODULES[*]}" "$([ "$UPGRADE" = 1 ] && echo true || echo false)" "${GIT_NAME:-}" "${GIT_EMAIL:-}" "$SSH_KEY_PATH" "${ALLOW_PORTS[*]:-}" "$([ "$REPAIR_PERMISSIONS" = 1 ] && echo true || echo false)" "$([ "$FORCE_APPLY" = 1 ] && echo true || echo false)"; fi; }
+
+run_check_like() {
+  local action="$1" module fn rc check_rc overall=0 dep status details baddep tmp tmp_check
+  RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=()
+  resolve_modules
+  for module in "${RESOLVED_MODULES[@]}"; do
+    baddep=""
+    for dep in ${INIT_MODULE_DEPS[$module]}; do
+      status=""
+      for i in "${!RESULT_MODULES[@]}"; do
+        [ "${RESULT_MODULES[$i]}" = "$dep" ] && status="${RESULT_STATUSES[$i]}"
+      done
+      case "$status" in failed|blocked|'check failed') baddep="dependency $dep $status";; esac
+    done
+    if [ -n "$baddep" ]; then
+      record_result "$module" blocked "$baddep"
+      overall=2
+      continue
+    fi
+
+    if [ "$action" = check ]; then
+      fn="${module}_module_check"
+      trap - ERR; set +e
+      tmp="$(mktemp "${TMPDIR:-/tmp}/init.module.XXXXXX")"
+      "$fn" >"$tmp" 2>&1
+      rc=$?
+      set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+      details="$(tr '\n' ';' <"$tmp" | sed 's/;*$//')"
+      rm -f "$tmp"
+      status="$(module_status_text "$rc")"
+      record_result "$module" "$status" "$details"
+      [ "$rc" -eq 1 ] && [ "$overall" -eq 0 ] && overall=1
+      [ "$rc" -ge 2 ] && overall=2
+      continue
+    fi
+
+    trap - ERR; set +e
+    tmp_check="$(mktemp "${TMPDIR:-/tmp}/init.plan-check.XXXXXX")"
+    "${module}_module_check" >"$tmp_check" 2>&1
+    check_rc=$?
+    set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+    if [ "$check_rc" -ge 2 ]; then
+      details="$(tr '\n' ';' <"$tmp_check" | sed 's/;*$//')"
+      rm -f "$tmp_check"
+      status="$(module_status_text "$check_rc")"
+      record_result "$module" "$status" "$details"
+      overall=2
+      continue
+    fi
+    rm -f "$tmp_check"
+
+    fn="${module}_module_plan"
+    trap - ERR; set +e
+    tmp="$(mktemp "${TMPDIR:-/tmp}/init.module.XXXXXX")"
+    "$fn" >"$tmp" 2>&1
+    rc=$?
+    set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+    details="$(tr '\n' ';' <"$tmp" | sed 's/;*$//')"
+    rm -f "$tmp"
+
+    if [ "$rc" -ne 0 ]; then
+      record_result "$module" failed "$details"
+      overall=2
+    elif [ "$check_rc" -eq 0 ]; then
+      record_result "$module" configured "$details"
+    else
+      record_result "$module" "needs changes" "$details"
+      [ "$overall" -eq 0 ] && overall=1
+    fi
+  done
+  print_results "$action"
+  return "$overall"
+}
+
+run_apply() {
+  local module pre rc post status details post_details overall=0 dep baddep fn tmp_pre tmp_apply tmp_post
+  RESULT_MODULES=(); RESULT_STATUSES=(); RESULT_DETAILS=()
+  resolve_modules
+  for module in "${RESOLVED_MODULES[@]}"; do
+    baddep=""
+    for dep in ${INIT_MODULE_DEPS[$module]}; do
+      for i in "${!RESULT_MODULES[@]}"; do
+        [ "${RESULT_MODULES[$i]}" = "$dep" ] || continue
+        case "${RESULT_STATUSES[$i]}" in failed|blocked) baddep="dependency $dep ${RESULT_STATUSES[$i]}";; esac
+      done
+    done
+    if [ -n "$baddep" ]; then
+      record_result "$module" blocked "$baddep"
+      overall=2
+      continue
+    fi
+
+    trap - ERR; set +e
+    tmp_pre="$(mktemp "${TMPDIR:-/tmp}/init.pre.XXXXXX")"
+    "${module}_module_check" >"$tmp_pre" 2>&1
+    pre=$?
+    set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+
+    if [ "$pre" -eq 0 ] && [ "$FORCE_APPLY" != 1 ]; then
+      record_result "$module" unchanged "already configured"
+      rm -f "${tmp_pre:-}"
+      continue
+    fi
+    if [ "$pre" -ge 2 ]; then
+      record_result "$module" blocked "pre-check $(module_status_text "$pre")"
+      overall=2
+      rm -f "${tmp_pre:-}"
+      continue
+    fi
+
+    fn="${module}_module_apply"
+    trap - ERR; set +e
+    tmp_apply="$(mktemp "${TMPDIR:-/tmp}/init.apply.XXXXXX")"
+    "$fn" >"$tmp_apply" 2>&1
+    rc=$?
+    set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+    details="$(tr '\n' ';' <"$tmp_apply" | sed 's/;*$//')"
+    rm -f "$tmp_apply"
+
+    if [ "$rc" -eq 3 ]; then
+      record_result "$module" skipped "${details:-skipped}"
+      rm -f "${tmp_pre:-}"
+      continue
+    fi
+    if [ "$rc" -ne 0 ]; then
+      record_result "$module" failed "${details:-apply failed}"
+      overall=2
+      rm -f "${tmp_pre:-}"
+      continue
+    fi
+
+    trap - ERR; set +e
+    tmp_post="$(mktemp "${TMPDIR:-/tmp}/init.post.XXXXXX")"
+    "${module}_module_check" >"$tmp_post" 2>&1
+    post=$?
+    set -e; trap 'init_error_trap ${LINENO} "$BASH_COMMAND"' ERR
+    post_details="$(tr '\n' ';' <"$tmp_post" | sed 's/;*$//')"
+    if [ "$post" -eq 0 ]; then
+      record_result "$module" applied "${post_details:-applied}"
+    else
+      record_result "$module" failed "post-check failed: ${post_details}"
+      overall=2
+    fi
+    rm -f "${tmp_pre:-}" "${tmp_post:-}"
+  done
+  print_results apply
+  return "$overall"
+}
+
 print_results() { local cmd="$1" i st overall="configured"; for st in "${RESULT_STATUSES[@]}"; do case "$st" in 'needs changes'|needs_changes) [ "$overall" = configured ] && overall=needs_changes;; failed|blocked|'check failed') overall=failed;; esac; done; if [ "$OUTPUT_FORMAT" = json ]; then printf '{"command":"%s","status":"%s","modules":[' "$cmd" "$(status_slug "$overall")"; for i in "${!RESULT_MODULES[@]}"; do [ "$i" -eq 0 ] || printf ','; printf '{"name":"%s","status":"%s","details":' "${RESULT_MODULES[$i]}" "$(status_slug "${RESULT_STATUSES[$i]}")"; print_json_string_array "${RESULT_DETAILS[$i]}"; printf '}'; done; printf ']}\n'; else printf '%-14s %-20s %s\n' "$(i18n_get results.module)" "$(i18n_get results.status)" "$(i18n_get results.details)"; for i in "${!RESULT_MODULES[@]}"; do printf '%-14s %-20s %s\n' "${RESULT_MODULES[$i]}" "$(i18n_status "${RESULT_STATUSES[$i]// /_}")" "${RESULT_DETAILS[$i]}"; done; fi; }
 main() { set +e; parse_args "$@"; local rc=$?; set -e; if [ "$rc" -ne 0 ]; then trap - ERR; set +e; return "$rc"; fi; load_modules; set +e; case "$COMMAND" in help) usage;; menu) menu_main;; version) printf '%s\n' "$INIT_VERSION";; modules) cmd_modules;; config) cmd_config;; check) run_check_like check;; plan) run_check_like plan;; apply) run_apply;; esac; rc=$?; set -e; return "$rc"; }
 main "$@"
